@@ -1,3 +1,10 @@
+# Sponsor
+Ask for my book (French version): Vibe Design. 30$ contribution via:
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/s/89b1e1cc6c)
+
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-green.svg)](https://www.paypal.me/MartinJDOtis)
+
 # UR5-Script-Design
 
 Tooling around the ISO/COLIPA cosmetic-spread protocol executed on a Universal Robots
