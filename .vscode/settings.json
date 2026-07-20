@@ -1,0 +1,13 @@
+{
+    "markdown-preview-enhanced.mathRenderingOption": "MathJax",
+    "markdown-preview-enhanced.usePandocParser": false,
+    "latex-workshop.latex.outDir": "out",
+    "latex-workshop.latex.clean.enabled": true,
+    "latex-workshop.latex.clean.outDir": true,
+    "latex-workshop.latex.autoBuild.run": "onSave",
+    "latex-workshop.formatting.latex":"latexindent",
+    "editor.wordWrap": "on",
+    "chat.tools.terminal.autoApprove": {
+        "Copy-Item": true
+    }
+}

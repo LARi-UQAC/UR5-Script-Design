@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find *)",
+      "Bash(cd *)",
+      "Bash(grep *)",
+      "Bash(dir *)",
+      "Bash(rtk python *)",
+      "Bash(rtk dir *)",
+      "Bash(rtk grep *)",
+      "Bash(rtk cd *)",
+      "Bash(rtk find *)"  
+    ]
+  }
+}

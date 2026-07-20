@@ -1,0 +1,27 @@
+# UR5Script - dependances Python 3.13
+# .venv local recommande pour isoler les conflits avec d'autres projets.
+# Installation : python -m venv .venv && .venv\Scripts\activate && pip install -r requirements.txt
+#
+# Notes :
+# - swift-sim 1.1.0 exige websockets < 13 (API asyncio change rompante).
+# - google-genai (si utilise ailleurs) exige websockets >= 13 -> incompatibilite
+#   resolue en gardant google-genai dans le venv global et UR5Script dans .venv.
+# - roboticstoolbox-python 1.1.1 a deux bugs runtime sur Python 3.13 + numpy >= 2 :
+#     * mobile/DistanceTransformPlanner.py : `from numpy import disp` -> patch try/except.
+#     * tools/xacro/xmlutils.py : signature `_write_data` -> patch try/except TypeError.
+# - swift-sim 1.1.0 sur Windows : le handler /retrieve/<chemin> recoit "/C:/..."
+#   ce qui fait echouer open() (404 cote navigateur, meshes UR5 non charges).
+#   Patch dans swift/SwiftRoute.py : strip du '/' initial avant la lettre de
+#   lecteur (do_GET, branche "/retrieve/").
+#   Les patches sont appliques manuellement (voir post-install steps dans README).
+
+numpy
+scipy
+matplotlib
+roboticstoolbox-python
+spatialmath-python
+spatialgeometry
+swift-sim>=1.1.0
+websockets<13
+pyright
+pip-audit

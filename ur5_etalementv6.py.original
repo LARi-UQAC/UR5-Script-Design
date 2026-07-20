@@ -1,0 +1,1589 @@
+"""
+UR5 - Protocole d'etalement cosmetique
+=======================================
+Protocole base sur la methode ISO/COLIPA simulant un etalement a doigt.
+
+Surface : 50 x 50 mm
+Outil   : doigt hemispherique silicone O20 mm
+Force Z : 6.0 +/- 0.5 N (encodee comme offset z constant)
+
+Sequence :
+  Cycles 1-3 : boustrophedon avec demi-tours en U + cercles continus, rotation 90deg entre chaque
+  Cycles 4-6 : rectilignes (13 allers-retours), rotation 90deg entre chaque
+
+Usage :
+  python ur5_etalement.py           -> affiche la simulation
+  python ur5_etalement.py --export  -> genere etalement.script (URScript)
+"""
+
+from typing import Any, List
+import json
+import re
+import time as _time
+from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.widgets import Button, Slider
+import argparse
+import socket
+
+# IPC : datagrammes UDP emis par ur5_sim/visualization/viewer.py pendant
+# la lecture, sur 127.0.0.1:TCP_LIVE_PORT. Le design UI ci-dessous bind ce
+# port en non-bloquant et draine la queue a chaque tick du timer matplotlib
+# pour ne conserver que la derniere frame. Latence loopback ~20-100 us
+# (vs ~1-10 ms pour l'ancien fichier tcp_live.json).
+from ur5_sim.ipc_config import (
+    TCP_LIVE_HOST,
+    TCP_LIVE_MAX_BYTES,
+    TCP_LIVE_PORT,
+)
+
+SCRIPT_PATH = Path(__file__).resolve().parent / "etalement.script"
+URP_PATH = Path(__file__).resolve().parent / "etalement.urp"
+
+# =============================================================================
+# PARAMETRES — modifier ici uniquement
+# =============================================================================
+
+# --- Surface ---
+SURFACE_W   = 50.0   # mm — largeur de la plaque
+SURFACE_H   = 50.0   # mm — hauteur de la plaque
+MARGIN      = 4.0    # mm — marge depuis le bord
+
+# --- Hauteurs robot ---
+Z_CONTACT   = 0.0    # mm — plan de la surface (z=0 dans le repere plaque)
+Z_TRANSIT   = 10.0   # mm — hauteur de remontee entre les cycles
+
+# --- Cycles circulaires (boustrophedon + epicycloide) ---
+N_CIRCULAR_CYCLES  = 3      # nombre de cycles circulaires
+CIRC_N_PASSES      = 4      # nombre de passes verticales par cycle (2 allers-retours)
+                             # espacement = (SURFACE_W - 2*MARGIN) / (N_PASSES-1)
+                             # = 42 / 7 = 6 mm = 2 * CIRC_R_CIRCLE -> recouvrement 100%
+                             # augmenter pour plus de densite, doit rester pair (allers-retours complets)
+CIRC_N_CIRCLES     = 20     # nombre de petits cercles par passe verticale
+                             # augmenter pour plus de chevauchement entre cercles
+CIRC_R_CIRCLE      = 5.0    # mm — rayon de chaque petit cercle (~O10 mm)
+                             # doit satisfaire : 2*R <= espacement entre passes
+                             # pour garantir le recouvrement sans trous
+CIRC_Y_START       = 5.0    # mm — Y du point de depart/arrivee (bas des passes)
+                             # y_top = SURFACE_H - CIRC_Y_START (symetrie)
+CIRC_SPEED         = 36.0   # mm/s — vitesse robot
+CIRC_DURATION      = 11.0   # sec — duree cible par cycle (reference protocole)
+
+# --- Cycles rectilignes ---
+N_LINEAR_CYCLES    = 3      # nombre de cycles rectilignes
+LIN_N_PASSES       = 13     # allers-retours par cycle (reference protocole)
+LIN_N_POINTS_PER_SEGMENT = 50 # nombre de points par segment (pour la generation de trajectoire)
+LIN_SPEED          = 80.0   # mm/s — vitesse robot
+LIN_DURATION_ODD   = 7.5    # sec — duree cycles 4 et 6 (reference protocole)
+LIN_DURATION_EVEN  = 6.0    # sec — duree cycle 5 (reference protocole)
+
+# --- TCP (Tool Center Point) ---
+# Decomposition Z : la pointe du doigt en silicone est a la somme des hauteurs
+# de la chaine outil empilee sur la bride robot (tool0). Les valeurs FT-300
+# et coupling refletent les meshes Robotiq utilises cote simulateur
+# (ur5_sim/meshes/endeffector.py).
+TCP_FT300_Z    = 34.8   # mm — hauteur du capteur force/couple Robotiq FT-300
+TCP_COUPLING_Z = 13.9   # mm — coupling Robotiq FT-300 -> 2F-85
+TCP_GRIPPER_Z  = 145.0  # mm — pince 2F-85 (base + doigts fermes -> face du pad)
+TCP_FINGER_Z   = 72.0   # mm — doigt silicone hemispherique (~70 mm + latex)
+
+TCP_X = 0.0    # mm — offset X depuis la bride robot
+TCP_Y = 0.0    # mm — offset Y depuis la bride robot
+TCP_Z = TCP_FT300_Z + TCP_COUPLING_Z + TCP_GRIPPER_Z + TCP_FINGER_Z  # ~265.7 mm
+
+# --- Coordonnees robot absolues (a calibrer sur site) ---
+ROBOT_X_ORIGIN  = 0.200    # m — position X de l'origine plaque dans le repere robot
+ROBOT_Y_ORIGIN  = -0.300   # m — position Y
+ROBOT_Z_SURFACE = 0.050    # m — hauteur Z de la surface dans le repere robot
+ROBOT_RX        = 3.14159  # rad — orientation outil (doigt vers le bas)
+ROBOT_RY        = 0.0      # rad
+ROBOT_RZ        = 0.0      # rad
+ROBOT_BASE_ROTATION_DEG = 225.0  # deg — rotation de la base du robot (180+45 deg, visible sur video)
+                                  # tous les offsets plaque sont transformes par cet angle
+
+# --- Ancre cible (pose effective de la zone d'etalement dans le repere robot) ---
+# Toutes les coordonnees emises dans .script sont absolues : elles sont calculees
+# en composant pose_trans(P_REF, pose_trans(pose_inv(P_ANCHOR_OLD), p_offset)) cote Python.
+# Modifier P_REF puis regenerer le script pour relocaliser la zone d'etalement.
+P_REF = [-0.011, 0.6, -0.3, 3.14159, 0.0, 0.0]
+
+# --- Controle de force en Z ---
+FORCE_Z_TARGET   = 6.0    # N — force de contact cible (protocole ISO : 6.0 +/- 0.5 N)
+FORCE_LIMIT_XY   = 0.002  # m — deviation max en XY (adherence trajectoire)
+FORCE_LIMIT_Z    = 0.040  # m — deviation max en Z (compliance verticale)
+FORCE_LIMIT_ROT  = 0.35   # rad — deviation max en orientation
+FORCE_CONTACT_DEPTH = 0.005 # m — profondeur cible sous le plan pour assurer le contact
+
+# --- Parametres URScript ---
+URSCRIPT_ACCEL       = 0.8    # m/s2 — acceleration movel
+URSCRIPT_BLEND       = 0.002  # m — blend radius (trajectoire fluide sans arret)
+URSCRIPT_TRANSIT_V   = 0.3    # m/s — vitesse de transit (hors contact)
+URSCRIPT_CONTACT_V   = 0.05   # m/s — vitesse de descente au contact
+URSCRIPT_RECONTACT_V = 0.01   # m/s — vitesse de re-descente au contact entre 2 cycles
+                              # plus lente que URSCRIPT_CONTACT_V car la regulation
+                              # de force n'est pas encore active a ce moment.
+URSCRIPT_N_WAYPOINTS_CIRCULAR = 80 # waypoints par cycle dans l'export URScript pour les cycles circulaires
+                               # augmenter pour plus de fidelite de la trajectoire exportee
+
+# --- Limite TCP PolyScope ---
+# PolyScope (CB-series + e-Series) impose un plafond TCP de 250 mm/s sur tout
+# movel/movec/movep. Au-dela, le controleur arrete le programme avec un
+# safety stop. Les vitesses TCP definies plus haut sont cappees a l'emission
+# par _clamp_tcp_speed(); un avertissement est imprime si le clamp s'active.
+URSCRIPT_MAX_TCP_SPEED = 0.250  # m/s — hard cap PolyScope
+
+# --- Budget memoire script genere ---
+# PolyScope charge le .script integralement en RAM (programme + variables +
+# threads). Au-dela d'environ 200 KB, le chargement devient instable et la
+# compilation des `def` peut declencher "out of memory" sur les CB-series.
+# generate_urscript() refuse l'export si le fichier produit depasse ce
+# budget ; l'utilisateur doit alors reduire URSCRIPT_N_WAYPOINTS_CIRCULAR
+# ou LIN_N_POINTS_PER_SEGMENT, ou passer en mode parametrique (cf.
+# plan_optimisation_urscript.md, Section 3).
+URSCRIPT_MAX_BYTES = 200_000   # octets — budget memoire confortable PolyScope
+
+# --- Sondage de surface (probe Z runtime, 3 points + ajustement de plan) ---
+PROBE_APPROACH_MM    = 30.0     # mm — hauteur de depart au-dessus du Z nominal
+PROBE_DESCENT_V      = 0.004    # m/s — vitesse de descente (4 mm/s, lente)
+PROBE_ACCEL          = 0.05     # m/s^2 — acceleration douce pendant le sondage
+PROBE_FORCE_THR      = 4.0      # N   — seuil de detection du contact
+PROBE_RETRY_MAX      = 1        # nombre de re-essais en cas d'echec
+PROBE_TILT_MAX_RAD   = 0.0873   # rad — inclinaison max acceptable du plan mesure (~5 deg).
+                                # Au-dela : popup + halt dans probe_surface_plane().
+# Triangle de sondage (plate-frame mm). Bien reparti pour conditionnement numerique.
+PROBE_POINTS_PLATE_MM = [(5.0, 5.0), (45.0, 5.0), (25.0, 45.0)]
+# Z plate-frame en mm de plancher (course maxi sous le nominal)
+PROBE_FLOOR_PLATE_MM = -10.0    # mm — si pas de contact a -10 mm sous nominal, echec
+
+# --- Securite approche initiale (L1 : pose courante UR5 inconnue au start) ---
+# pose_home = [0,0,Z_TRANSIT] plate-frame -> monde. Au demarrage la pose
+# reelle du TCP est inconnue; un movej Cartesien direct depuis une config
+# repliee peut traverser une singularite ou heurter la cellule.
+# Strategie en deux temps :
+#   1. Lire get_actual_tcp_pose(), refuser de continuer si distance > radius.
+#      L'operateur doit re-jog manuellement vers une zone connue.
+#   2. movej(Q_SAFE_JOINTS_RAD) en joint-space (config repli predictable),
+#      puis movej(pose_home) Cartesien depuis cette config sure.
+SAFE_APPROACH_RADIUS_M = 0.8    # m — rayon spherique max autour de pose_home
+                                # au-dela : popup + halt (re-jog requis)
+# Config repli "ready" UR5 : base 0, epaule -90deg, coude +90deg, poignets
+# -90,-90,0. TCP pointe vers -Z monde, hors zone d'etalement. Verifiee non
+# singuliere et hors collision pour montage table standard.
+Q_SAFE_JOINTS_RAD = (0.0, -1.5708, 1.5708, -1.5708, -1.5708, 0.0)
+
+# =============================================================================
+# GENERATEURS DE TRAJECTOIRES
+# =============================================================================
+
+def get_waypoint_indices(total_pts_count, cycle_type):
+    """
+    Calcule les indices des points exportés vers l'URScript.
+    Pour les cycles linéaires, retourne les points aux "coins" (début et fin de chaque segment).
+    Pour les cycles circulaires, effectue un sous-échantillonnage.
+    """
+    if cycle_type == 'linear':
+        # Supporte aussi les trajectoires linéaires réduites (mode triangulé) :
+        # le nombre de points par passe n'est pas forcément LIN_N_POINTS_PER_SEGMENT.
+        pts_per_pass = max(1, int(total_pts_count // max(1, LIN_N_PASSES)))
+        indices = set()
+        for i in range(LIN_N_PASSES):
+            start_idx = min(i * pts_per_pass, total_pts_count - 1)
+            end_idx = min((i + 1) * pts_per_pass - 1, total_pts_count - 1)
+            indices.add(start_idx)  # Start of segment
+            indices.add(end_idx)    # End of segment
+        return sorted(list(indices))
+    else: # 'circular' or other types
+        step = max(1, total_pts_count // URSCRIPT_N_WAYPOINTS_CIRCULAR)
+        # Ensure first and last points are always included
+        return sorted(list(set([0] + list(range(step, total_pts_count, step)) + [total_pts_count - 1])))
+
+def rotate_points(pts, angle_deg, cx=None, cy=None):
+    """Rotation 2D autour du centre de la surface."""
+    if cx is None: cx = SURFACE_W / 2.0
+    if cy is None: cy = SURFACE_H / 2.0
+    a = np.radians(angle_deg)
+    c, s = np.cos(a), np.sin(a)
+    x, y = pts[:, 0] - cx, pts[:, 1] - cy
+    return np.column_stack([c*x - s*y + cx, s*x + c*y + cy])
+
+
+def circular_cycle(rotation_deg=0, n_pts_pass=600, n_pts_turn=100):
+    """
+    Boustrophedon avec epicycloide continue + sections droites debut/fin :
+
+    Structure :
+      [section droite bas]  carrier descend de y_bot -> CIRC_Y_START + R
+      [passes en U]         n_passes verticales reliees par demi-tours
+      [section droite bas]  carrier remonte de y_bot -> CIRC_Y_START + R
+
+    Les sections droites permettent d'atteindre CIRC_Y_START en Y
+    sans que les demi-tours ne depassent le bord de la plaque.
+    """
+    R        = CIRC_R_CIRCLE
+    n_passes = CIRC_N_PASSES
+
+    # Passes X : bornes pour que les cercles (rayon R) restent dans [0, SURFACE_W]
+    x_first  = R                            # premier carrier a R du bord
+    x_last   = SURFACE_W - R               # dernier carrier a R du bord
+    xs       = np.linspace(x_first, x_last, n_passes)
+    spacing  = xs[1] - xs[0]
+    r_turn   = spacing / 2.0
+
+    # y_bot/y_top : limites des passes verticales, calculees pour que les
+    # demi-tours + cercles restent dans [0, SURFACE_H]
+    y_bot = r_turn + R                  # minimum garanti sans depassement
+    y_top = SURFACE_H - r_turn - R
+
+    # y_start : position cible du depart/arrivee (CIRC_Y_START + R = centre carrier)
+    y_start = CIRC_Y_START             # position Y du point de depart/arrivee (carrier)
+    n_straight = max(2, int(n_pts_pass * abs(y_bot - y_start) / (y_top - y_bot)))                 if y_start < y_bot else 2
+
+    carrier_x, carrier_y = [], []
+
+    # --- Section droite initiale ---
+    # Descend de y_start jusqu'a y_bot sur la premiere colonne x_first
+    if y_start < y_bot:
+        ys_init = np.linspace(y_start, y_bot, n_straight)
+        carrier_x.append(np.full(n_straight, xs[0]))
+        carrier_y.append(ys_init)
+
+    # --- Passes en U ---
+    for i in range(n_passes):
+        ys = np.linspace(y_bot, y_top, n_pts_pass) if i % 2 == 0 \
+             else np.linspace(y_top, y_bot, n_pts_pass)
+        carrier_x.append(np.full(n_pts_pass, xs[i]))
+        carrier_y.append(ys)
+
+        if i < n_passes - 1:
+            cx_turn = (xs[i] + xs[i + 1]) / 2.0
+            if i % 2 == 0:
+                angles = np.linspace(np.pi, 0, n_pts_turn)
+                ty = y_top + r_turn * np.sin(angles)
+            else:
+                angles = np.linspace(np.pi, 2*np.pi, n_pts_turn)
+                ty = y_bot + r_turn * np.sin(angles)
+            carrier_x.append(cx_turn + r_turn * np.cos(angles))
+            carrier_y.append(ty)
+
+    # --- Section droite finale ---
+    # Remonte de y_bot jusqu'a y_start sur la derniere colonne x_last
+    # La derniere passe est impaire (n_passes-1=3) -> descente -> finit a y_bot
+    if y_start < y_bot:
+        ys_final = np.linspace(y_bot, y_start, n_straight)
+        carrier_x.append(np.full(n_straight, xs[-1]))
+        carrier_y.append(ys_final)
+
+    carrier_x = np.concatenate(carrier_x)
+    carrier_y = np.concatenate(carrier_y)
+
+    # Epicycloide : theta base sur la distance cumulee (arc-length parametrization)
+    # -> densite de cercles uniforme sur les passes ET les demi-tours
+    dx    = np.diff(carrier_x, prepend=carrier_x[0])
+    dy    = np.diff(carrier_y, prepend=carrier_y[0])
+    ds    = np.sqrt(dx**2 + dy**2)
+    s     = np.cumsum(ds)                          # distance cumulee le long du carrier
+    s_norm = s / s[-1]                             # normalisee 0->1
+    # CIRC_N_CIRCLES = nb de cercles par passe verticale
+    # longueur totale ~ n_passes * hauteur_passe -> total_turns proportionnel
+    total_turns = CIRC_N_CIRCLES * n_passes
+    theta = 2 * np.pi * total_turns * s_norm
+    x = carrier_x + R * np.cos(theta)
+    y = carrier_y + R * np.sin(theta)
+
+    pts = np.column_stack([x, y])
+    if rotation_deg != 0:
+        pts = rotate_points(pts, rotation_deg)
+    return np.column_stack([pts, np.full(len(pts), Z_CONTACT)])
+
+
+def linear_cycle(rotation_deg=0):
+    """
+    LIN_N_PASSES allers-retours rectilignes en boustrophedon.
+    Les passes sont reparties uniformement sur toute la surface.
+    """
+    n_pts = LIN_N_POINTS_PER_SEGMENT # Utilise la nouvelle constante
+    positions_y = np.linspace(MARGIN, SURFACE_H - MARGIN, LIN_N_PASSES)
+    all_pts = []
+    for i, y in enumerate(positions_y):
+        xs = np.linspace(MARGIN, SURFACE_W - MARGIN, n_pts) if i % 2 == 0 \
+             else np.linspace(SURFACE_W - MARGIN, MARGIN, n_pts)
+        all_pts.append(np.column_stack([xs, np.full(n_pts, y)]))
+    pts = np.vstack(all_pts)
+    if rotation_deg != 0:
+        pts = rotate_points(pts, rotation_deg)
+    return np.column_stack([pts, np.full(len(pts), Z_CONTACT)])
+
+
+def triangular_cycle(rotation_deg=0):
+    """
+    Variante "triangulee" derivee directement de la sequence des coins
+    du mode Rect (un point par debut/fin de passe).
+
+    Reduction : sur la liste des coins Rect [c0, c1, c2, ..., c_{N-1}],
+    on conserve c0 et c_{N-1} et on remplace les paires intermediaires
+    (c1, c2), (c3, c4), ... par leur milieu. Cela correspond a
+    "prendre un point milieu une fois sur deux" tout en diminuant le
+    nombre total de points par rapport au mode Rect.
+    """
+    rect_pts = np.asarray(linear_cycle(rotation_deg=0), dtype=float)
+    n_rect = int(rect_pts.shape[0])
+    corner_idx = np.asarray(get_waypoint_indices(n_rect, 'linear'), dtype=int)
+    corners = rect_pts[corner_idx]
+    n_corners = int(corners.shape[0])
+
+    if n_corners <= 2:
+        pts = corners.copy()
+    else:
+        rows = [corners[0]]
+        j = 1
+        while j + 1 < n_corners:
+            rows.append((corners[j] + corners[j + 1]) / 2.0)
+            j += 2
+        # Si un coin intermediaire reste non apparie, le conserver.
+        if j < n_corners - 1:
+            rows.append(corners[j])
+        rows.append(corners[-1])
+        pts = np.asarray(rows, dtype=float)
+
+    if rotation_deg != 0:
+        xy = rotate_points(pts[:, :2], rotation_deg)
+        pts = np.column_stack([xy, pts[:, 2]])
+    return pts
+
+
+def build_full_trajectory():
+    """Assemble les 6 cycles dans l'ordre du protocole."""
+    rotations = [0, 90, 0]
+    colors_circ = ['#1f77b4', '#ff7f0e', '#2ca02c']
+    colors_lin  = ['#d62728', '#9467bd', '#8c564b']
+
+    cycles = []
+    for i in range(N_CIRCULAR_CYCLES):
+        cycles.append({
+            'label': f'Cycle {i+1} - Circulaire ({rotations[i]}deg)',
+            'color': colors_circ[i],
+            'pts'  : circular_cycle(rotation_deg=rotations[i]),
+            'type' : 'circular',
+        })
+    for i in range(N_LINEAR_CYCLES):
+        cycles.append({
+            'label': f'Cycle {i+4} - Rectiligne ({rotations[i]}deg)',
+            'color': colors_lin[i],
+            'pts'  : linear_cycle(rotation_deg=rotations[i]),
+            'type' : 'linear',
+        })
+    return cycles
+
+
+# =============================================================================
+# VISUALISATION
+# =============================================================================
+
+def _style_ax(ax, title):
+    ax.set_facecolor('#16213e')
+    ax.add_patch(mpatches.Rectangle(
+        (0, 0), SURFACE_W, SURFACE_H,
+        linewidth=1.5, edgecolor='white', facecolor='none', linestyle='--'))
+    ax.set_xlim(-5, SURFACE_W + 5)
+    ax.set_ylim(-5, SURFACE_H + 5)
+    ax.set_aspect('equal')
+    ax.set_title(title, color='white', fontsize=9, pad=4)
+    ax.tick_params(colors='#aaaaaa', labelsize=7)
+    ax.set_xlabel('X (mm)', color='#aaaaaa', fontsize=7)
+    ax.set_ylabel('Y (mm)', color='#aaaaaa', fontsize=7)
+    for spine in ax.spines.values():
+        spine.set_edgecolor('#444466')
+
+def draw_validation_grid(ax):
+    """Adds the 9-point validation grid overlay to a matplotlib axis."""
+    coords = np.linspace(MARGIN, SURFACE_W - MARGIN, 3)
+    idx = 1
+    # Plot in matrix order (top to bottom)
+    for y in reversed(coords):
+        for x in coords:
+            circ = mpatches.Circle((x, y), 2.5, color='yellow', alpha=0.3, 
+                                   ec='white', linestyle='--', zorder=2)
+            ax.add_patch(circ)
+            ax.text(x, y, str(idx), color='white', weight='bold', 
+                    ha='center', va='center', fontsize=8, zorder=3)
+            idx += 1
+
+
+def plot_static(cycles):
+    fig, axes = plt.subplots(2, 3, figsize=(14, 11))
+    fig.patch.set_facecolor('#1a1a2e')
+    total_s = N_CIRCULAR_CYCLES * CIRC_DURATION + N_LINEAR_CYCLES * LIN_DURATION_ODD
+    fig.suptitle(
+        f"UR5 - Protocole d'etalement cosmetique\n"
+        f"{int(SURFACE_W)} x {int(SURFACE_H)} mm | 6 cycles | Duree totale = {total_s:.0f} s",
+        color='white', fontsize=13, fontweight='bold', y=0.98)
+
+    # Slider de discretisation pour les cycles 1-3 (circulaires)
+    min_pts = 50
+    max_pts = 2000
+    natural_pts = max(len(cycles[i]['pts']) for i in range(3))
+    init_pts = min(max_pts, max(min_pts, natural_pts))
+
+    def _resample_points(pts, n_points):
+        n_points = max(2, int(n_points))
+
+        # Re-échantillonne sur la distance curviligne pour conserver un pas spatial uniforme.
+        deltas = np.diff(pts[:, :2], axis=0)
+        seg_len = np.sqrt((deltas ** 2).sum(axis=1))
+        s = np.concatenate(([0.0], np.cumsum(seg_len)))
+
+        # Supprime les doublons de distance (segments nuls) pour une interpolation stable.
+        keep = np.concatenate(([True], np.diff(s) > 1e-12))
+        s_u = s[keep]
+        pts_u = pts[keep]
+
+        if len(s_u) < 2 or s_u[-1] <= 1e-12:
+            return np.repeat(pts_u[:1], n_points, axis=0)
+
+        s_target = np.linspace(0.0, s_u[-1], n_points)
+        x = np.interp(s_target, s_u, pts_u[:, 0])
+        y = np.interp(s_target, s_u, pts_u[:, 1])
+        z = np.interp(s_target, s_u, pts_u[:, 2])
+        return np.column_stack((x, y, z))
+
+    waypoint_scatters = []
+    cycle_lines = []
+    start_markers = []
+    end_markers = []
+    current_circular_pts: List[Any] = [None, None, None]
+    current_linear_pts: List[Any] = [None, None, None]
+    current_linear_waypoint_indices: List[Any] = [None, None, None]
+    linear_mode = {'triangular': False}
+    for idx, (ax, cyc) in enumerate(zip(axes.flat, cycles)):
+        _style_ax(ax, cyc['label'])
+        pts = cyc['pts']
+        if idx < 3:
+            pts = _resample_points(pts, init_pts)
+            current_circular_pts[idx] = pts
+
+        line, = ax.plot(pts[:, 0], pts[:, 1], color=cyc['color'], linewidth=0.5, alpha=0.9)
+        cycle_lines.append(line)
+
+        # Points de route (Waypoints) - Masqués par défaut
+        if idx < 3:
+            # Les cycles 1-3 affichent exactement les points de discrétisation du slider.
+            indices = np.arange(len(pts))
+        else:
+            # Cycles 4-6 en mode Rect (etat initial): discretisation aux coins.
+            # Export : conserver la liste dediee current_linear_waypoint_indices.
+            indices = get_waypoint_indices(len(pts), cyc['type'])
+            current_linear_pts[idx - 3] = pts
+            current_linear_waypoint_indices[idx - 3] = get_waypoint_indices(len(pts), cyc['type'])
+        sc = ax.scatter(pts[indices, 0], pts[indices, 1], c='yellow', s=20, 
+                        edgecolor='black', linewidth=0.3, zorder=4, visible=False)
+        waypoint_scatters.append(sc)
+
+        start_marker = ax.scatter(pts[0, 0],  pts[0, 1],  c='lime', s=60, zorder=5)
+        end_marker = ax.scatter(pts[-1, 0], pts[-1, 1], c='red',  s=60, zorder=5, marker='X')
+        start_markers.append(start_marker)
+        end_markers.append(end_marker)
+
+        handles = [mpatches.Patch(color='lime', label='Depart'),
+                   mpatches.Patch(color='red',  label='Fin'),
+                   mpatches.Patch(color='yellow', label='Waypoints')]
+        ax.legend(handles=handles, fontsize=6, loc='lower right',
+                  facecolor='#0f3460', edgecolor='none', labelcolor='white')
+
+    ax_slider = fig.add_axes([0.22, 0.49, 0.56, 0.022], facecolor='#0f3460')
+    pts_slider = Slider(
+        ax=ax_slider,
+        label='Cycles 1-3 : points de discretisation',
+        valmin=min_pts,
+        valmax=max_pts,
+        valinit=init_pts,
+        valstep=10,
+        color='#3a86ff'
+    )
+    pts_slider.label.set_color('white')
+    pts_slider.valtext.set_color('white')
+
+    ax_r_circle = fig.add_axes([0.22, 0.455, 0.56, 0.02], facecolor='#0f3460')
+    r_circle_slider = Slider(
+        ax=ax_r_circle,
+        label='CIRC_R_CIRCLE',
+        valmin=0.0,
+        valmax=10.0,
+        valinit=float(CIRC_R_CIRCLE),
+        valstep=0.1,
+        color='#ff8fab'
+    )
+    r_circle_slider.label.set_color('white')
+    r_circle_slider.valtext.set_color('white')
+
+    ax_n_cycles = fig.add_axes([0.22, 0.422, 0.56, 0.02], facecolor='#0f3460')
+    n_cycles_slider = Slider(
+        ax=ax_n_cycles,
+        label='N_CIRCULAR_CYCLES',
+        valmin=0,
+        valmax=10,
+        valinit=int(N_CIRCULAR_CYCLES),
+        valstep=1,
+        color='#90be6d'
+    )
+    n_cycles_slider.label.set_color('white')
+    n_cycles_slider.valtext.set_color('white')
+
+    ax_n_passes = fig.add_axes([0.22, 0.389, 0.56, 0.02], facecolor='#0f3460')
+    n_passes_slider = Slider(
+        ax=ax_n_passes,
+        label='CIRC_N_PASSES',
+        valmin=0,
+        valmax=10,
+        valinit=int(CIRC_N_PASSES),
+        valstep=1,
+        color='#f9c74f'
+    )
+    n_passes_slider.label.set_color('white')
+    n_passes_slider.valtext.set_color('white')
+
+    ax_n_circles = fig.add_axes([0.22, 0.356, 0.56, 0.02], facecolor='#0f3460')
+    n_circles_slider = Slider(
+        ax=ax_n_circles,
+        label='CIRC_N_CIRCLES',
+        valmin=1,
+        valmax=60,
+        valinit=int(CIRC_N_CIRCLES),
+        valstep=1,
+        color='#43aa8b'
+    )
+    n_circles_slider.label.set_color('white')
+    n_circles_slider.valtext.set_color('white')
+
+    def _build_circular_with_params(rotation_deg, radius_mm, n_passes, n_circles):
+        global CIRC_R_CIRCLE, CIRC_N_PASSES, CIRC_N_CIRCLES
+        old_r = CIRC_R_CIRCLE
+        old_n_passes = CIRC_N_PASSES
+        old_n_circles = CIRC_N_CIRCLES
+        try:
+            CIRC_R_CIRCLE = float(radius_mm)
+            CIRC_N_PASSES = max(2, int(n_passes))
+            CIRC_N_CIRCLES = max(1, int(n_circles))
+            return circular_cycle(rotation_deg=rotation_deg)
+        finally:
+            CIRC_R_CIRCLE = old_r
+            CIRC_N_PASSES = old_n_passes
+            CIRC_N_CIRCLES = old_n_circles
+
+    def update_discretization(val):
+        n_points = int(pts_slider.val)
+        show_waypoints = waypoint_scatters[0].get_visible()
+        active_cycles = min(3, max(0, int(round(n_cycles_slider.val))))
+        radius = float(r_circle_slider.val)
+        n_passes = int(n_passes_slider.val)
+        n_circles = int(n_circles_slider.val)
+        rotations = [0, 90, 0]
+
+        for i in range(3):
+            if i < active_cycles:
+                pts_full = _build_circular_with_params(rotations[i], radius, n_passes, n_circles)
+                pts_resampled = _resample_points(pts_full, n_points)
+                cycle_lines[i].set_visible(True)
+                current_circular_pts[i] = pts_resampled
+            else:
+                pts_resampled = np.empty((0, 3))
+                cycle_lines[i].set_visible(False)
+                current_circular_pts[i] = None
+
+            if len(pts_resampled) > 0:
+                cycle_lines[i].set_data(pts_resampled[:, 0], pts_resampled[:, 1])
+                start_markers[i].set_offsets(np.array([[pts_resampled[0, 0], pts_resampled[0, 1]]]))
+                end_markers[i].set_offsets(np.array([[pts_resampled[-1, 0], pts_resampled[-1, 1]]]))
+                start_markers[i].set_visible(True)
+                end_markers[i].set_visible(True)
+            else:
+                cycle_lines[i].set_data([], [])
+                start_markers[i].set_visible(False)
+                end_markers[i].set_visible(False)
+
+            waypoint_scatters[i].remove()
+
+            indices = np.arange(len(pts_resampled))
+            waypoint_scatters[i] = axes.flat[i].scatter(
+                pts_resampled[indices, 0] if len(indices) else [],
+                pts_resampled[indices, 1] if len(indices) else [],
+                c='yellow',
+                s=14,
+                edgecolor='black',
+                linewidth=0.25,
+                zorder=4,
+                visible=show_waypoints,
+            )
+        fig.canvas.draw_idle()
+
+    def _update_linear_cycles_shape(show_waypoints=None):
+        if show_waypoints is None:
+            show_waypoints = waypoint_scatters[0].get_visible()
+
+        rotations = [0, 90, 0]
+        for i in range(3):
+            cyc_idx = i + 3
+            if linear_mode['triangular']:
+                pts = triangular_cycle(rotation_deg=rotations[i])
+                shape_label = 'Triangule'
+            else:
+                pts = linear_cycle(rotation_deg=rotations[i])
+                shape_label = 'Rectiligne'
+
+            current_linear_pts[i] = pts
+            if linear_mode['triangular']:
+                # Mode Tri : tous les points reduits sont des waypoints (= midpoints par construction).
+                current_linear_waypoint_indices[i] = list(range(len(pts)))
+            else:
+                # Mode Rect : seulement les coins (debut/fin de chaque passe).
+                current_linear_waypoint_indices[i] = get_waypoint_indices(len(pts), 'linear')
+
+            cycles[cyc_idx]['pts'] = pts
+            cycles[cyc_idx]['label'] = f'Cycle {cyc_idx+1} - {shape_label} ({rotations[i]}deg)'
+            cycles[cyc_idx]['type'] = 'linear'
+
+            cycle_lines[cyc_idx].set_data(pts[:, 0], pts[:, 1])
+            axes.flat[cyc_idx].set_title(cycles[cyc_idx]['label'], color='white', fontsize=9, pad=4)
+            start_markers[cyc_idx].set_offsets(np.array([[pts[0, 0], pts[0, 1]]]))
+            end_markers[cyc_idx].set_offsets(np.array([[pts[-1, 0], pts[-1, 1]]]))
+            start_markers[cyc_idx].set_visible(True)
+            end_markers[cyc_idx].set_visible(True)
+
+            waypoint_scatters[cyc_idx].remove()
+            # Affichage : Rect = coins uniquement, Tri = tous les points reduits.
+            if linear_mode['triangular']:
+                idx_wp = np.arange(len(pts))
+            else:
+                idx_wp = current_linear_waypoint_indices[i]
+            waypoint_scatters[cyc_idx] = axes.flat[cyc_idx].scatter(
+                pts[idx_wp, 0],
+                pts[idx_wp, 1],
+                c='yellow',
+                s=20,
+                edgecolor='black',
+                linewidth=0.3,
+                zorder=4,
+                visible=show_waypoints,
+            )
+
+        fig.canvas.draw_idle()
+
+    pts_slider.on_changed(update_discretization)
+    r_circle_slider.on_changed(update_discretization)
+    n_cycles_slider.on_changed(update_discretization)
+    n_passes_slider.on_changed(update_discretization)
+    n_circles_slider.on_changed(update_discretization)
+    update_discretization(None)
+
+    # Ajout du bouton de bascule
+    ax_btn = fig.add_axes([0.42, 0.015, 0.16, 0.04])
+    btn = Button(ax_btn, 'Afficher Waypoints', color='#0f3460', hovercolor='#16213e')
+    btn.label.set_color('white')
+    btn.label.set_fontsize(8)
+
+    # Bouton de forme cycles 4-6
+    ax_btn_shape = fig.add_axes([0.18, 0.015, 0.16, 0.04])
+    btn_shape = Button(ax_btn_shape, 'Tri/Rect: Rect', color='#0f3460', hovercolor='#16213e')
+    btn_shape.label.set_color('white')
+    btn_shape.label.set_fontsize(8)
+
+    # Bouton d'export URScript avec l'etat courant des sliders
+    ax_btn_export = fig.add_axes([0.60, 0.015, 0.20, 0.04])
+    btn_export = Button(ax_btn_export, 'Exporter URScript', color='#0f3460', hovercolor='#16213e')
+    btn_export.label.set_color('white')
+    btn_export.label.set_fontsize(8)
+
+
+    def toggle_wp(event):
+        new_vis = not waypoint_scatters[0].get_visible()
+        for sc in waypoint_scatters:
+            sc.set_visible(new_vis)
+        fig.canvas.draw_idle()
+
+    def toggle_shape_mode(event):
+        linear_mode['triangular'] = not linear_mode['triangular']
+        btn_shape.label.set_text('Tri/Rect: Tri' if linear_mode['triangular'] else 'Tri/Rect: Rect')
+        _update_linear_cycles_shape()
+
+    def export_current_urscript(event):
+        active_cycles = min(3, max(0, int(round(n_cycles_slider.val))))
+        export_cycles = []
+
+        for i in range(active_cycles):
+            pts = current_circular_pts[i]
+            if pts is None or len(pts) < 2:
+                continue
+            export_cycles.append({
+                'label': f'Cycle {i+1} - Circulaire (UI)',
+                'color': cycles[i]['color'],
+                'pts': pts,
+                'type': 'circular',
+                # Pas de sous-discretisation a l'export UI: reproduire
+                # exactement les points affiches pour les cycles 1-3.
+                'waypoint_indices': list(range(len(pts))),
+            })
+
+        for i in range(3):
+            pts_lin = current_linear_pts[i]
+            wp_lin = current_linear_waypoint_indices[i]
+            if pts_lin is None or wp_lin is None:
+                continue
+            export_cycles.append({
+                'label': cycles[i + 3]['label'],
+                'color': cycles[i + 3]['color'],
+                'pts': pts_lin,
+                'type': 'linear',
+                'waypoint_indices': wp_lin,
+            })
+
+        if len(export_cycles) == 0:
+            print('[EXPORT] Aucun cycle a exporter avec les reglages actuels.')
+            return
+
+        generate_urscript(export_cycles, filename=SCRIPT_PATH)
+        print(f"[EXPORT] URScript genere depuis l'UI avec {len(export_cycles)} cycles -> {SCRIPT_PATH}")
+
+    btn.on_clicked(toggle_wp)
+    btn_shape.on_clicked(toggle_shape_mode)
+    btn_export.on_clicked(export_current_urscript)
+    fig._toggle_btn = btn # Référence persistante pour éviter que le bouton ne soit désactivé
+    fig._shape_btn = btn_shape
+    fig._export_btn = btn_export
+    fig._pts_slider = pts_slider
+    fig._r_circle_slider = r_circle_slider
+    fig._n_cycles_slider = n_cycles_slider
+    fig._n_passes_slider = n_passes_slider
+    fig._n_circles_slider = n_circles_slider
+
+    _update_linear_cycles_shape(show_waypoints=False)
+
+    # ------------------------------------------------------------------
+    # Live TCP overlay : un marqueur etoile cyan par sous-graphique de
+    # cycle. Le poll IPC lit ``tcp_live.json`` ecrit par ur5_sim et
+    # n'affiche le marqueur que sur le sous-graphique du cycle en cours
+    # d'execution. Coordonnees converties du repere robot (m) vers le
+    # repere plaque (mm) via l'inverse de ``plate_to_robot``.
+    # ------------------------------------------------------------------
+    live_tcp_scatters: List[Any] = []
+    live_tcp_trails: List[Any] = []
+    trail_buffers: List[tuple] = [([], []) for _ in range(6)]
+    for ax in axes.flat:
+        ln, = ax.plot([], [], color='cyan', lw=1.3, alpha=0.85, zorder=5)
+        live_tcp_trails.append(ln)
+        sc_live = ax.scatter(
+            [], [],
+            c='cyan', s=140, edgecolor='black', linewidth=1.0,
+            zorder=6, visible=False, marker='*',
+        )
+        live_tcp_scatters.append(sc_live)
+
+    poll_state = {'last_cycle': 0, 'last_frame': -1, 'last_running': False}
+
+    # Mapping runtime cycle_N -> subplot logique Cycle X-1.
+    # Le viewer publie l'indice de la fonction cycle_N dans le script ;
+    # on le remappe vers le numero de cycle visible dans le label
+    # "# --- Cycle X - ... ---" pour garantir une correspondance stable.
+    cycle_slot_map = {'mtime': None, 'map': {}}
+
+    def _refresh_cycle_slot_map_from_script() -> None:
+        try:
+            mtime = SCRIPT_PATH.stat().st_mtime
+        except OSError:
+            cycle_slot_map['mtime'] = None
+            cycle_slot_map['map'] = {}
+            return
+
+        if cycle_slot_map['mtime'] == mtime:
+            return
+
+        try:
+            with open(SCRIPT_PATH, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        except OSError:
+            cycle_slot_map['mtime'] = mtime
+            cycle_slot_map['map'] = {}
+            return
+
+        fn_re = re.compile(r'^\s*def\s+cycle_(\d+)\s*\(\s*\)\s*:')
+        lbl_re = re.compile(r'Cycle\s+(\d+)\b', re.IGNORECASE)
+        out: dict[int, int] = {}
+        current_runtime_idx = None
+
+        for line in lines:
+            m_fn = fn_re.match(line)
+            if m_fn:
+                current_runtime_idx = int(m_fn.group(1))
+                continue
+
+            if current_runtime_idx is None:
+                continue
+
+            m_lbl = lbl_re.search(line)
+            if m_lbl:
+                logical_cycle = int(m_lbl.group(1))
+                subplot_idx = logical_cycle - 1
+                if 0 <= subplot_idx < len(axes.flat):
+                    out[current_runtime_idx] = subplot_idx
+                current_runtime_idx = None
+
+        cycle_slot_map['mtime'] = mtime
+        cycle_slot_map['map'] = out
+
+    def _world_to_plate_mm(wx_m: float, wy_m: float) -> tuple[float, float]:
+        # Un-bake P_REF * P_ANCHOR_OLD^-1 (cf. _abs_pose) puis inverse de
+        # plate_to_robot. Necessaire car etalement.script emet des poses
+        # absolues (world), plus des p_orig (repere robot base).
+        p_anchor_old = [ROBOT_X_ORIGIN, ROBOT_Y_ORIGIN, ROBOT_Z_SURFACE,
+                        ROBOT_RX, ROBOT_RY, ROBOT_RZ]
+        world_pose = [wx_m, wy_m, ROBOT_Z_SURFACE,
+                      ROBOT_RX, ROBOT_RY, ROBOT_RZ]
+        p_orig = _pose_trans(p_anchor_old,
+                             _pose_trans(_pose_inv(P_REF), world_pose))
+        rx_m, ry_m = p_orig[0], p_orig[1]
+        a = np.radians(ROBOT_BASE_ROTATION_DEG)
+        dx = rx_m - ROBOT_X_ORIGIN
+        dy = ry_m - ROBOT_Y_ORIGIN
+        plate_x_m = dx * np.cos(a) + dy * np.sin(a)
+        plate_y_m = -dx * np.sin(a) + dy * np.cos(a)
+        return plate_x_m * 1000.0, plate_y_m * 1000.0
+
+    def _reset_trails():
+        for i in range(len(live_tcp_trails)):
+            trail_buffers[i] = ([], [])
+            live_tcp_trails[i].set_data([], [])
+
+    def _hide_all_live_markers():
+        changed = False
+        for sc in live_tcp_scatters:
+            if sc.get_visible():
+                sc.set_visible(False)
+                changed = True
+        if changed:
+            fig.canvas.draw_idle()
+
+    # Socket UDP non-bloquant pour la telemetrie viewer -> design UI.
+    # Cree paresseusement a la 1re itre du timer pour qu'un echec de bind
+    # (port occupe par une autre instance du design UI) n'empeche pas
+    # l'ouverture de l'UI elle-meme : les marqueurs live restent simplement
+    # caches tant que le bind echoue.
+    ipc_state = {'sock': None, 'bind_failed': False}
+
+    def _ensure_ipc_socket():
+        if ipc_state['sock'] is not None or ipc_state['bind_failed']:
+            return ipc_state['sock']
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((TCP_LIVE_HOST, TCP_LIVE_PORT))
+            sock.setblocking(False)
+            ipc_state['sock'] = sock
+        except OSError as exc:
+            ipc_state['bind_failed'] = True
+            print(f"[ur5_etalement] UDP bind {TCP_LIVE_HOST}:{TCP_LIVE_PORT} "
+                  f"failed ({exc!r}); live overlay disabled.")
+        return ipc_state['sock']
+
+    def _poll_live_tcp():
+        _refresh_cycle_slot_map_from_script()
+
+        sock = _ensure_ipc_socket()
+        if sock is None:
+            _hide_all_live_markers()
+            return
+        # Drain : on garde la derniere frame parmi tous les datagrammes
+        # accumules depuis le dernier tick (16-20 ms typique a 60 fps).
+        last_payload = None
+        while True:
+            try:
+                data_bytes, _addr = sock.recvfrom(TCP_LIVE_MAX_BYTES)
+                last_payload = data_bytes
+            except BlockingIOError:
+                break
+            except OSError:
+                break
+        if last_payload is None:
+            return
+        try:
+            data = json.loads(last_payload.decode('utf-8'))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return
+        running = bool(data.get('running', False))
+        ts = float(data.get('ts', 0.0))
+        stale = (_time.time() - ts) > 1.5
+        cycle = int(data.get('cycle', 0))
+        frame = int(data.get('frame', 0))
+
+        # Ignore les frames hors ordre (e.g. ecriture concurrente/stale)
+        # sauf reset explicite au frame 0 en debut d'execution.
+        if (
+            running
+            and poll_state['last_running']
+            and frame < poll_state['last_frame']
+            and frame != 0
+        ):
+            return
+
+        # Reset des traces des qu'une nouvelle execution demarre (front
+        # montant de running ou retour au frame 0).
+        if (not poll_state['last_running']) and running:
+            _reset_trails()
+        elif running and frame == 0 and poll_state['last_frame'] > 0:
+            _reset_trails()
+
+        poll_state['last_running'] = running
+        poll_state['last_frame'] = frame
+
+        if (not running) or stale or cycle < 1 or cycle > len(live_tcp_scatters):
+            _hide_all_live_markers()
+            poll_state['last_cycle'] = cycle
+            return
+
+        rx = float(data.get('x_anchor_m', 0.0))
+        ry = float(data.get('y_anchor_m', 0.0))
+        px_mm, py_mm = _world_to_plate_mm(rx, ry)
+        sub_idx = cycle_slot_map['map'].get(cycle, cycle - 1)
+        if sub_idx < 0 or sub_idx >= len(live_tcp_scatters):
+            _hide_all_live_markers()
+            poll_state['last_cycle'] = cycle
+            return
+
+        trail_anchor_m = data.get('trail_anchor_m')
+        if isinstance(trail_anchor_m, list) and len(trail_anchor_m) > 0:
+            xs_mm = []
+            ys_mm = []
+            for pair in trail_anchor_m:
+                if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+                    continue
+                try:
+                    tx_m = float(pair[0])
+                    ty_m = float(pair[1])
+                except (TypeError, ValueError):
+                    continue
+                tx_mm, ty_mm = _world_to_plate_mm(tx_m, ty_m)
+                xs_mm.append(tx_mm)
+                ys_mm.append(ty_mm)
+
+            if xs_mm:
+                trail_buffers[sub_idx] = (xs_mm, ys_mm)
+                live_tcp_trails[sub_idx].set_data(xs_mm, ys_mm)
+                px_mm, py_mm = xs_mm[-1], ys_mm[-1]
+        else:
+            # Fallback ancien mode : ajoute seulement le point courant.
+            trail_buffers[sub_idx][0].append(px_mm)
+            trail_buffers[sub_idx][1].append(py_mm)
+            live_tcp_trails[sub_idx].set_data(
+                trail_buffers[sub_idx][0], trail_buffers[sub_idx][1]
+            )
+
+        for i, sc in enumerate(live_tcp_scatters):
+            if i == sub_idx:
+                sc.set_offsets(np.array([[px_mm, py_mm]]))
+                sc.set_visible(True)
+            elif sc.get_visible():
+                sc.set_visible(False)
+
+        poll_state['last_cycle'] = cycle
+        fig.canvas.draw_idle()
+
+    # Poll plus frequent pour limiter la perte visuelle de points live.
+    live_timer = fig.canvas.new_timer(interval=20)
+    live_timer.add_callback(_poll_live_tcp)
+    live_timer.start()
+    fig._live_timer = live_timer
+    fig._live_tcp_scatters = live_tcp_scatters
+
+    def _apply_ui_layout():
+        # Layout de base pour garantir que toute l'UI reste dans la fenetre.
+        fig.subplots_adjust(left=0.06, right=0.98, top=0.93, bottom=0.10, wspace=0.22, hspace=0.62)
+
+        # Bande fixe des boutons (toujours en bas, hors des graphes).
+        # Trois boutons : Tri/Rect, Afficher Waypoints, Exporter URScript.
+        # La simulation est lancee depuis ur5_sim (START interne au viewer),
+        # le design UI se contente d'afficher les positions live via IPC.
+        button_y = 0.005
+        button_h = 0.045
+        ax_btn_shape.set_position([0.04, button_y, 0.28, button_h])
+        ax_btn.set_position([0.36, button_y, 0.28, button_h])
+        ax_btn_export.set_position([0.68, button_y, 0.28, button_h])
+
+        # Bande fixe pour les graphes cycles 4-6, entre boutons et sliders.
+        # Slider le plus bas (CIRC_N_CIRCLES) est a y=0.356 -> top du bottom row max 0.34.
+        bottom_row_y = 0.07
+        bottom_row_h = 0.22
+        for ax in axes[1, :]:
+            pos = ax.get_position()
+            ax.set_position([pos.x0, bottom_row_y, pos.width, bottom_row_h])
+
+    _apply_ui_layout()
+
+    def _on_resize(event):
+        _apply_ui_layout()
+        fig.canvas.draw_idle()
+
+    fig._layout_resize_cid = fig.canvas.mpl_connect('resize_event', _on_resize)
+    return fig
+
+
+def plot_overlay(cycles):
+    fig, ax = plt.subplots(figsize=(7, 7))
+    fig.patch.set_facecolor('#1a1a2e')
+    _style_ax(ax, "Vue superposee - couverture globale")
+    for cyc in cycles:
+        pts = cyc['pts']
+        ax.plot(pts[:, 0], pts[:, 1], color=cyc['color'],
+                linewidth=0.5, alpha=0.6, label=cyc['label'])
+    ax.legend(fontsize=7, facecolor='#0f3460', edgecolor='none',
+              labelcolor='white', loc='upper left')
+    plt.tight_layout()
+    return fig
+
+
+# =============================================================================
+# EXPORT URSCRIPT
+# =============================================================================
+
+def mm_to_m(v):
+    return round(v / 1000.0, 6)
+
+
+def _clamp_tcp_speed(name, v_mps):
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Plafonne une vitesse TCP a URSCRIPT_MAX_TCP_SPEED (limite PolyScope).
+        Imprime un avertissement quand le clamp s'active : l'export reste
+        valide mais le profil de vitesse demande n'est pas tenu.
+
+    Inputs:
+        name (str): nom de la constante (pour le message)
+        v_mps (float): vitesse desiree en m/s
+
+    Outputs:
+        v_clamped (float): min(v_mps, URSCRIPT_MAX_TCP_SPEED)
+    --------------------------------------------------------------------------
+    """
+    if v_mps > URSCRIPT_MAX_TCP_SPEED:
+        print(f"WARN: {name} = {v_mps:.3f} m/s > limite PolyScope "
+              f"{URSCRIPT_MAX_TCP_SPEED:.3f} m/s, clamp.")
+        return URSCRIPT_MAX_TCP_SPEED
+    return v_mps
+
+
+def plate_to_robot(x_mm, y_mm):
+    """
+    Convertit des coordonnees plaque (mm) en coordonnees repere robot (m).
+    Applique la rotation ROBOT_BASE_ROTATION_DEG autour de l'origine plaque,
+    puis ajoute l'offset ROBOT_X/Y_ORIGIN.
+    Avec ROBOT_BASE_ROTATION_DEG=0, equivalent a mm_to_m(x)+ROBOT_X_ORIGIN.
+    """
+    angle = np.radians(ROBOT_BASE_ROTATION_DEG)
+    dx = mm_to_m(x_mm)
+    dy = mm_to_m(y_mm)
+    rx = ROBOT_X_ORIGIN + dx * np.cos(angle) - dy * np.sin(angle)
+    ry = ROBOT_Y_ORIGIN + dx * np.sin(angle) + dy * np.cos(angle)
+    return round(rx, 6), round(ry, 6)
+
+
+# ---------------------------------------------------------------------------
+# Equivalents Python des primitives URScript pose_trans / pose_inv.
+# Permettent de baker la transformation P_REF * P_ANCHOR_OLD^-1 cote generateur
+# pour emettre directement des poses absolues, sans T(p_orig) dans le .script.
+# ---------------------------------------------------------------------------
+
+def _rotvec_to_matrix(rv):
+    theta = float(np.linalg.norm(rv))
+    if theta < 1e-12:
+        return np.eye(3)
+    k = np.asarray(rv, dtype=float) / theta
+    K = np.array([[0.0, -k[2], k[1]],
+                  [k[2], 0.0, -k[0]],
+                  [-k[1], k[0], 0.0]])
+    return np.eye(3) + np.sin(theta) * K + (1.0 - np.cos(theta)) * (K @ K)
+
+
+def _matrix_to_rotvec(R):
+    R = np.asarray(R, dtype=float)
+    cos_theta = (np.trace(R) - 1.0) / 2.0
+    cos_theta = max(-1.0, min(1.0, cos_theta))
+    theta = float(np.arccos(cos_theta))
+    if theta < 1e-12:
+        return np.zeros(3)
+    if abs(theta - np.pi) < 1e-9:
+        diag = np.array([R[0, 0], R[1, 1], R[2, 2]])
+        i = int(np.argmax(diag))
+        axis = np.zeros(3)
+        axis[i] = np.sqrt(max(0.0, (R[i, i] + 1.0) / 2.0))
+        for j in range(3):
+            if j != i and axis[i] > 1e-12:
+                axis[j] = R[i, j] / (2.0 * axis[i])
+        return axis * theta
+    sin_theta = np.sin(theta)
+    rx = (R[2, 1] - R[1, 2]) / (2.0 * sin_theta)
+    ry = (R[0, 2] - R[2, 0]) / (2.0 * sin_theta)
+    rz = (R[1, 0] - R[0, 1]) / (2.0 * sin_theta)
+    return np.array([rx, ry, rz]) * theta
+
+
+def _pose_trans(a, b):
+    ta = np.asarray(a[:3], dtype=float)
+    tb = np.asarray(b[:3], dtype=float)
+    Ra = _rotvec_to_matrix(a[3:])
+    Rb = _rotvec_to_matrix(b[3:])
+    R = Ra @ Rb
+    t = ta + Ra @ tb
+    return list(t) + list(_matrix_to_rotvec(R))
+
+
+def _pose_inv(a):
+    ta = np.asarray(a[:3], dtype=float)
+    Ra = _rotvec_to_matrix(a[3:])
+    R_inv = Ra.T
+    t_inv = -R_inv @ ta
+    return list(t_inv) + list(_matrix_to_rotvec(R_inv))
+
+
+def _abs_pose(p_orig):
+    """
+    Equivalent du T(p_orig) URScript :
+        pose_trans(P_REF, pose_trans(pose_inv(P_ANCHOR_OLD), p_orig))
+    P_ANCHOR_OLD est l'ancre nominale = pose des constantes ROBOT_* d'origine plaque.
+    """
+    p_anchor_old = [ROBOT_X_ORIGIN, ROBOT_Y_ORIGIN, ROBOT_Z_SURFACE,
+                    ROBOT_RX, ROBOT_RY, ROBOT_RZ]
+    return _pose_trans(P_REF, _pose_trans(_pose_inv(p_anchor_old), list(p_orig)))
+
+
+def _fmt_pose(p_orig):
+    """Compose vers la pose absolue et formate comme litteral URScript p[...]."""
+    abs_pose = _abs_pose(p_orig)
+    return 'p[' + ', '.join(f'{v:.6f}' for v in abs_pose) + ']'
+
+
+def _build_urscript_lines(cycles):
+    """
+    Construit la liste des lignes URScript a emettre (partagee entre
+    generate_urscript et generate_urp). Inclut le sondage de surface 3 points,
+    l'ajustement de plan, et la correction par waypoint via apply_correction().
+    """
+    z_transit_m = ROBOT_Z_SURFACE + mm_to_m(Z_TRANSIT)
+    speed_var_map = {'circular': 'V_CIRC', 'linear': 'V_RECT'}
+
+    # --- Pre-calculs sondage de surface ---
+    # Convention p_orig identique aux cycles (cf. lignes plus bas) :
+    #   - XY : plate_to_robot(x_mm, y_mm) -> coordonnees repere robot (m)
+    #   - Z  : ROBOT_Z_SURFACE + offset_plate_mm/1000
+    # _abs_pose compose P_REF * pose_inv(P_ANCHOR_OLD) * p_orig avec
+    # P_ANCHOR_OLD = [ROBOT_X_ORIGIN, ROBOT_Y_ORIGIN, ROBOT_Z_SURFACE, ...],
+    # donc NOMINAL_FRAME se retrouve sur le meme plan monde que les
+    # waypoints contact des cycles. apply_correction() est l'identite quand
+    # la plaque reelle correspond au plan nominal -> residu 0 cote ur5_sim.
+    probe_pts_robot = [plate_to_robot(x_mm, y_mm) for (x_mm, y_mm) in PROBE_POINTS_PLATE_MM]
+    probe_nominal_contact = [
+        _abs_pose([px_r, py_r, ROBOT_Z_SURFACE, ROBOT_RX, ROBOT_RY, ROBOT_RZ])
+        for (px_r, py_r) in probe_pts_robot
+    ]
+    # NOMINAL_FRAME : origine = P1_nominal monde sur le plan de contact des
+    # cycles, orientation = orientation outil monde.
+    nominal_frame_pose = probe_nominal_contact[0]
+
+    # Normale unitaire de la plaque nominale exprimee en monde (axe plate-Z monde).
+    # Difference de deux poses 1 mm d'ecart en plate-Z avec la meme convention
+    # cycle (ROBOT_Z_SURFACE + delta). p_orig.XY arbitraire (origine plaque).
+    _p0 = _abs_pose([ROBOT_X_ORIGIN, ROBOT_Y_ORIGIN, ROBOT_Z_SURFACE,
+                     ROBOT_RX, ROBOT_RY, ROBOT_RZ])
+    _p1 = _abs_pose([ROBOT_X_ORIGIN, ROBOT_Y_ORIGIN, ROBOT_Z_SURFACE + 0.001,
+                     ROBOT_RX, ROBOT_RY, ROBOT_RZ])
+    _n = np.array(_p1[:3]) - np.array(_p0[:3])
+    _nhat = _n / np.linalg.norm(_n)
+
+    def _fmt_raw_pose(p6):
+        return 'p[' + ', '.join(f'{v:.6f}' for v in p6) + ']'
+
+    # Poses URScript d'approche et de plancher par point, emises en
+    # coordonnees absolues monde (MEAS_FRAME n'existe pas encore - construit
+    # par probe_surface_plane() apres les 3 descentes).
+    probe_blocks = []
+    for (px_r, py_r) in probe_pts_robot:
+        z_app = ROBOT_Z_SURFACE + mm_to_m(PROBE_APPROACH_MM)
+        z_flo = ROBOT_Z_SURFACE + mm_to_m(PROBE_FLOOR_PLATE_MM)
+        pose_app   = _fmt_pose([px_r, py_r, z_app, ROBOT_RX, ROBOT_RY, ROBOT_RZ])
+        pose_floor = _fmt_pose([px_r, py_r, z_flo, ROBOT_RX, ROBOT_RY, ROBOT_RZ])
+        probe_blocks.append((pose_app, pose_floor))
+
+    p_ref_str = 'p[' + ', '.join(f'{v}' for v in P_REF) + ']'
+    nominal_frame_str = _fmt_raw_pose(nominal_frame_pose)
+    lines = [
+        '# UR5 - Protocole etalement cosmetique',
+        '# Genere automatiquement par ur5_etalement.py',
+        '# IMPORTANT : calibrer ROBOT_X_ORIGIN, ROBOT_Y_ORIGIN, ROBOT_Z_SURFACE avant execution',
+        '',
+        '# --- Ancre de la zone d\'etalement ---',
+        '# P_REF : pose de reference effective (informationnelle). Les waypoints',
+        '# emis ci-dessous sont en coordonnees plate-frame (relatif a NOMINAL_FRAME)',
+        '# et sont transformes a l\'execution par apply_correction() = pose_trans(MEAS_FRAME, .).',
+        f'global P_REF = {p_ref_str}',
+        '',
+        '# --- Vitesses (m/s) par phase ---',
+        '# Toutes les vitesses TCP (movel) sont cappees a URSCRIPT_MAX_TCP_SPEED',
+        f'# = {URSCRIPT_MAX_TCP_SPEED} m/s (limite PolyScope, safety stop au-dela).',
+        f'# V_INIT reste en rad/s (joint-space movej), non concerne par le cap.',
+        f'global URSCRIPT_MAX_TCP_SPEED = {URSCRIPT_MAX_TCP_SPEED}  # m/s — limite PolyScope',
+        f'global URSCRIPT_TRANSIT_V = {_clamp_tcp_speed("URSCRIPT_TRANSIT_V", URSCRIPT_TRANSIT_V):.4f}  #sym:URSCRIPT_TRANSIT_V',
+        f'global URSCRIPT_CONTACT_V = {_clamp_tcp_speed("URSCRIPT_CONTACT_V", URSCRIPT_CONTACT_V):.4f}  #sym:URSCRIPT_CONTACT_V',
+        f'global URSCRIPT_RECONTACT_V = {_clamp_tcp_speed("URSCRIPT_RECONTACT_V", URSCRIPT_RECONTACT_V):.4f}  #sym:URSCRIPT_RECONTACT_V',
+        f'global V_CIRC = {_clamp_tcp_speed("V_CIRC", mm_to_m(CIRC_SPEED)):.4f}  #sym:CIRC_SPEED',
+        f'global V_RECT = {_clamp_tcp_speed("V_RECT", mm_to_m(LIN_SPEED)):.4f}  #sym:LIN_SPEED',
+        'global V_INIT = 0.5  #sym:V_INIT (rad/s pour movej, non TCP)',
+        '',
+        '# --- Accelerations (m/s^2) par phase ---',
+        f'global URSCRIPT_ACCEL = {URSCRIPT_ACCEL}  #sym:URSCRIPT_ACCEL',
+        'global A_INIT = 1.2  #sym:A_INIT',
+        '',
+        '# --- Facteurs multiplicateurs globaux ---',
+        'global SPEED_FACTOR = 1.0',
+        'global ACCEL_FACTOR = 1.0',
+        f'global URSCRIPT_BLEND = {URSCRIPT_BLEND}  #sym:URSCRIPT_BLEND',
+        '',
+        '# --- Securite approche initiale (L1 : pose courante inconnue) ---',
+        f'global SAFE_APPROACH_RADIUS_M = {SAFE_APPROACH_RADIUS_M}',
+        f'global Q_SAFE_JOINTS = [{", ".join(f"{q:.6f}" for q in Q_SAFE_JOINTS_RAD)}]',
+        '',
+        '# --- Sondage de surface (plan 3 points + frame mesure) ---',
+        f'global PROBE_FORCE_THR    = {PROBE_FORCE_THR}',
+        f'global PROBE_DESCENT_V    = {_clamp_tcp_speed("PROBE_DESCENT_V", PROBE_DESCENT_V):.4f}',
+        f'global PROBE_ACCEL        = {PROBE_ACCEL}',
+        f'global PROBE_TILT_MAX_RAD = {PROBE_TILT_MAX_RAD}',
+        f'global NHAT_X = {_nhat[0]:.9f}',
+        f'global NHAT_Y = {_nhat[1]:.9f}',
+        f'global NHAT_Z = {_nhat[2]:.9f}',
+        '# NOMINAL_FRAME : cadre nominal (origine P1, orientation outil monde).',
+        '# Reference utilisee pour exprimer tous les waypoints en plate-frame.',
+        f'global NOMINAL_FRAME = {nominal_frame_str}',
+        '# MEAS_FRAME : cadre du plan reel mesure. Initialise a NOMINAL_FRAME',
+        '# puis recalcule par probe_surface_plane() apres sondage 3 points.',
+        f'global MEAS_FRAME = {nominal_frame_str}',
+    ]
+    for i, pose in enumerate(probe_nominal_contact, start=1):
+        lines.append(f'global NOMINAL_P{i}_X = {pose[0]:.6f}')
+        lines.append(f'global NOMINAL_P{i}_Y = {pose[1]:.6f}')
+        lines.append(f'global NOMINAL_P{i}_Z = {pose[2]:.6f}')
+    lines += [
+        'global contact_found = False',
+        'global contact_pose = p[0,0,0,0,0,0]',
+        '',
+        '# --- Thread de surveillance de la force pendant la descente ---',
+        'thread probe_watcher():',
+        '  while True:',
+        '    f_norm = norm(get_tcp_force()[0:3])',
+        '    if f_norm > PROBE_FORCE_THR:',
+        '      stopl(2.0)',
+        '      contact_pose = get_actual_tcp_pose()',
+        '      contact_found = True',
+        '      break',
+        '    end',
+        '    sync()',
+        '  end',
+        'end',
+        '',
+        '# --- Sondage d\'un seul point (avec un re-essai) ---',
+        'def probe_one(approach_pose, floor_pose, label):',
+        '  attempt = 0',
+        f'  while attempt <= {PROBE_RETRY_MAX}:',
+        '    contact_found = False',
+        '    # V_INIT (movej rad/s) inadapte au movel (TCP m/s, plafond 250 mm/s).',
+        '    movel(approach_pose, a=A_INIT*ACCEL_FACTOR, v=URSCRIPT_TRANSIT_V*SPEED_FACTOR)',
+        '    sleep(0.4)',
+        '    zero_ftsensor()',
+        '    sleep(0.2)',
+        '    watcher_handle = run probe_watcher()',
+        '    movel(floor_pose, a=PROBE_ACCEL, v=PROBE_DESCENT_V)',
+        '    sleep(0.1)',
+        '    kill watcher_handle',
+        '    if contact_found:',
+        '      textmsg(label, " contact OK")',
+        '      return contact_pose',
+        '    end',
+        '    textmsg(label, " contact NOK, retry attempt=", attempt+1)',
+        '    attempt = attempt + 1',
+        '  end',
+        '  popup("Probe failed - aucun contact detecte", "Verifier echantillon/calibration", error=True)',
+        '  halt',
+        'end',
+        '',
+        '# --- Sondage 3 points + construction du frame mesure ---',
+        '# Apres sondage, on calcule la normale mesuree n_meas = (cp2 - cp1) x (cp3 - cp1),',
+        '# le vecteur rotation de Rodrigues entre NHAT (normale nominale monde) et n_meas,',
+        '# puis MEAS_FRAME = pose_trans(rotation_only @ cp1, orient_nominal_outil).',
+        'def probe_surface_plane():',
+        '  textmsg(">>> Sondage de la surface : 3 points")',
+        f'  cp1 = probe_one({probe_blocks[0][0]}, {probe_blocks[0][1]}, "P1")',
+        f'  cp2 = probe_one({probe_blocks[1][0]}, {probe_blocks[1][1]}, "P2")',
+        f'  cp3 = probe_one({probe_blocks[2][0]}, {probe_blocks[2][1]}, "P3")',
+        '  # --- Vecteurs du triangle mesure (monde) ---',
+        '  v12x = cp2[0] - cp1[0]',
+        '  v12y = cp2[1] - cp1[1]',
+        '  v12z = cp2[2] - cp1[2]',
+        '  v13x = cp3[0] - cp1[0]',
+        '  v13y = cp3[1] - cp1[1]',
+        '  v13z = cp3[2] - cp1[2]',
+        '  # --- Normale mesuree n = v12 x v13, normalisee ---',
+        '  nx = v12y*v13z - v12z*v13y',
+        '  ny = v12z*v13x - v12x*v13z',
+        '  nz = v12x*v13y - v12y*v13x',
+        '  nrm = sqrt(nx*nx + ny*ny + nz*nz)',
+        '  nx = nx / nrm',
+        '  ny = ny / nrm',
+        '  nz = nz / nrm',
+        '  # Force l\'orientation vers le meme demi-espace que NHAT (outil descend depuis le haut).',
+        '  dot_nom = NHAT_X*nx + NHAT_Y*ny + NHAT_Z*nz',
+        '  if dot_nom < 0:',
+        '    nx = -nx',
+        '    ny = -ny',
+        '    nz = -nz',
+        '    dot_nom = -dot_nom',
+        '  end',
+        '  # --- Rodrigues entre NHAT et n_meas : axis = NHAT x n_meas, angle = atan2(|axis|, dot) ---',
+        '  ax = NHAT_Y*nz - NHAT_Z*ny',
+        '  ay = NHAT_Z*nx - NHAT_X*nz',
+        '  az = NHAT_X*ny - NHAT_Y*nx',
+        '  anrm = sqrt(ax*ax + ay*ay + az*az)',
+        '  ang = atan2(anrm, dot_nom)',
+        '  # Garde : refuse un sondage trop incline (configuration erronee ou plaque manquante).',
+        '  if ang > PROBE_TILT_MAX_RAD:',
+        '    textmsg("Tilt mesure (rad) = ", ang)',
+        '    popup("Plan mesure trop incline", "ang > PROBE_TILT_MAX_RAD - verifier installation/calibration", error=True)',
+        '    halt',
+        '  end',
+        '  if anrm > 1.0e-9:',
+        '    ax = ax / anrm',
+        '    ay = ay / anrm',
+        '    az = az / anrm',
+        '  else:',
+        '    ax = 0.0',
+        '    ay = 0.0',
+        '    az = 0.0',
+        '  end',
+        '  # --- MEAS_FRAME = (translation cp1) * (rotation Rodrigues) * (orientation outil nominale) ---',
+        '  pose_rot   = p[cp1[0], cp1[1], cp1[2], ax*ang, ay*ang, az*ang]',
+        '  pose_orient = p[0, 0, 0, NOMINAL_FRAME[3], NOMINAL_FRAME[4], NOMINAL_FRAME[5]]',
+        '  MEAS_FRAME = pose_trans(pose_rot, pose_orient)',
+        '  textmsg("Surface tilt (rad) = ", ang)',
+        '  textmsg("MEAS_FRAME origin Z (m) = ", cp1[2])',
+        'end',
+        '',
+        '# --- apply_correction : ramene un waypoint monde nominal vers le plan reel ---',
+        '# p_world : pose monde absolue emise par le generateur Python (deja composee',
+        '# avec P_REF * pose_inv(P_ANCHOR_OLD)). On la ramene dans NOMINAL_FRAME via',
+        '# pose_inv(NOMINAL_FRAME), puis on la transporte vers MEAS_FRAME.',
+        '# Avant le sondage, MEAS_FRAME == NOMINAL_FRAME -> apply_correction est l\'identite,',
+        '# ce qui permet la compatibilite avec le simulateur (poses .script consommees telles quelles).',
+        'def apply_correction(p_world):',
+        '  return pose_trans(MEAS_FRAME, pose_trans(pose_inv(NOMINAL_FRAME), p_world))',
+        'end',
+        '',
+    ]
+
+    # Chaque cycle dans sa propre sous-fonction pour eviter "duplicate label"
+    # (limite URScript ~256 labels par fonction, ~83 movel/cycle x 6 = 500 > limite)
+    for idx, cyc in enumerate(cycles, start=1):
+        pts  = cyc['pts']
+        spd_var = speed_var_map[cyc['type']]
+        lines.append(f'def cycle_{idx}():')
+        lines.append(f'  # --- {cyc["label"]} ---')
+
+        px0, py0 = plate_to_robot(pts[0, 0], pts[0, 1])
+        pose_transit_in = _fmt_pose([px0, py0, z_transit_m, ROBOT_RX, ROBOT_RY, ROBOT_RZ])
+        # On vise legerement sous la surface pour laisser le controleur de force agir
+        pose_contact_deep = _fmt_pose([px0, py0, ROBOT_Z_SURFACE - FORCE_CONTACT_DEPTH, ROBOT_RX, ROBOT_RY, ROBOT_RZ])
+        
+        lines.append(f'  movel(apply_correction({pose_transit_in}), '
+                     f'a=URSCRIPT_ACCEL*ACCEL_FACTOR, v=URSCRIPT_TRANSIT_V*SPEED_FACTOR)')
+        lines.append('  sleep(0.2)')
+        lines.append('  zero_ftsensor()')
+        lines.append('  sleep(0.2)')
+        
+        # CORRECTIF : Activer force_mode AVANT la descente au contact
+        lines.append(f'  force_mode(MEAS_FRAME, [0, 0, 1, 0, 0, 0], '
+                     f'[0, 0, {-FORCE_Z_TARGET:.1f}, 0, 0, 0], 2, '
+                     f'[{FORCE_LIMIT_XY}, {FORCE_LIMIT_XY}, {FORCE_LIMIT_Z}, '
+                     f'{FORCE_LIMIT_ROT}, {FORCE_LIMIT_ROT}, {FORCE_LIMIT_ROT}])')
+
+        lines.append(f'  movel(apply_correction({pose_contact_deep}), '
+                     f'a=URSCRIPT_ACCEL*ACCEL_FACTOR, v=URSCRIPT_RECONTACT_V*SPEED_FACTOR)')
+                     
+
+        waypoint_indices = cyc.get('waypoint_indices')
+        if waypoint_indices is None:
+            waypoint_indices = get_waypoint_indices(len(pts), cyc['type'])
+        for i in waypoint_indices:
+            px, py = plate_to_robot(pts[i, 0], pts[i, 1])
+            pose_wp = _fmt_pose([px, py, ROBOT_Z_SURFACE, ROBOT_RX, ROBOT_RY, ROBOT_RZ])
+            lines.append(f'  movel(apply_correction({pose_wp}), '
+                         f'a=URSCRIPT_ACCEL*ACCEL_FACTOR, v={spd_var}*SPEED_FACTOR, r=URSCRIPT_BLEND)')
+
+        px_last, py_last = plate_to_robot(pts[-1, 0], pts[-1, 1])
+        pose_transit_out = _fmt_pose([px_last, py_last, z_transit_m, ROBOT_RX, ROBOT_RY, ROBOT_RZ])
+        lines.append('  end_force_mode()')
+        lines.append(f'  movel(apply_correction({pose_transit_out}), '
+                     f'a=URSCRIPT_ACCEL*ACCEL_FACTOR, v=URSCRIPT_TRANSIT_V*SPEED_FACTOR)')
+        lines.append('end')
+        lines.append('')
+
+    # Fonction principale : init TCP + sondage + appel des sous-fonctions
+    # pose_home : origine plate (0, 0) a la hauteur z_transit_m (= ROBOT_Z_SURFACE
+    # + mm_to_m(Z_TRANSIT)), composee par _abs_pose avec P_REF. Resultat monde :
+    # 10 mm au-dessus de la zone d'etalement, orientation outil nominale.
+    # _abs_pose attend p_orig en plate-frame avec surface a Z = ROBOT_Z_SURFACE
+    # (meme convention que les waypoints transit_in / transit_out).
+    pose_home_raw = _abs_pose([0.0, 0.0, z_transit_m, ROBOT_RX, ROBOT_RY, ROBOT_RZ])
+    pose_home = _fmt_raw_pose(pose_home_raw)
+    home_x, home_y, home_z = pose_home_raw[0], pose_home_raw[1], pose_home_raw[2]
+    lines += [
+        'def etalement():',
+        f'  set_tcp(p[{mm_to_m(TCP_X)}, {mm_to_m(TCP_Y)}, {mm_to_m(TCP_Z)}, 0, 0, 0])',
+        '  # --- L1 : approche securisee depuis pose courante UR5 inconnue ---',
+        '  # 1. Verifier que le TCP courant est dans une enveloppe spherique',
+        '  #    autour de pose_home. Sinon : popup + halt (re-jog manuel requis).',
+        '  current_pose = get_actual_tcp_pose()',
+        f'  dx_home = current_pose[0] - ({home_x:.6f})',
+        f'  dy_home = current_pose[1] - ({home_y:.6f})',
+        f'  dz_home = current_pose[2] - ({home_z:.6f})',
+        '  d_home = sqrt(dx_home*dx_home + dy_home*dy_home + dz_home*dz_home)',
+        '  if d_home > SAFE_APPROACH_RADIUS_M:',
+        '    textmsg("TCP courant trop loin de pose_home, d (m) = ", d_home)',
+        '    popup("Pose courante hors enveloppe sure", "Re-jog manuel requis (d > SAFE_APPROACH_RADIUS_M) avant relance", error=True)',
+        '    halt',
+        '  end',
+        '  # 2. Replier vers config articulaire predictable (joint-space, hors',
+        '  #    singularite) avant le movej Cartesien vers pose_home.',
+        '  movej(Q_SAFE_JOINTS, a=A_INIT*ACCEL_FACTOR, v=V_INIT*SPEED_FACTOR)',
+        f'  movej({pose_home}, a=A_INIT*ACCEL_FACTOR, v=V_INIT*SPEED_FACTOR)',
+        '  probe_surface_plane()',
+        '',
+    ]
+    for idx in range(1, len(cycles) + 1):
+        lines.append(f'  cycle_{idx}()')
+    lines += ['end', '', 'etalement()']
+    return lines
+
+
+def _validate_script_memory(filename, label):
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Verifie que la taille du fichier genere reste dans le budget memoire
+        PolyScope (URSCRIPT_MAX_BYTES). Imprime la consommation absolue et
+        relative. Retourne False si depasse, True sinon.
+
+    Inputs:
+        filename (Path): chemin du fichier ecrit
+        label (str): nom du format ("URScript", "URP") pour les messages
+
+    Outputs:
+        ok (bool): True si <= budget, False si depasse (echec d'exportation)
+    --------------------------------------------------------------------------
+    """
+    size_bytes = filename.stat().st_size
+    pct = 100.0 * size_bytes / URSCRIPT_MAX_BYTES
+    print(f"Memoire {label}: {size_bytes} octets / {URSCRIPT_MAX_BYTES} "
+          f"({pct:.1f}% du budget PolyScope)")
+    if size_bytes > URSCRIPT_MAX_BYTES:
+        print(f"ECHEC EXPORT {label}: budget memoire URSCRIPT_MAX_BYTES = "
+              f"{URSCRIPT_MAX_BYTES} octets depasse de {size_bytes - URSCRIPT_MAX_BYTES} "
+              f"octets. Reduire URSCRIPT_N_WAYPOINTS_CIRCULAR / "
+              f"LIN_N_POINTS_PER_SEGMENT ou passer en mode parametrique.")
+        return False
+    return True
+
+
+def generate_urscript(cycles, filename=SCRIPT_PATH):
+    """
+    Genere un fichier URScript executable sur le controleur UR5.
+    Adapter ROBOT_X_ORIGIN, ROBOT_Y_ORIGIN, ROBOT_Z_SURFACE a la calibration reelle.
+    Inclut un sondage de surface en 3 points avec ajustement de plan ; la
+    correction Z est appliquee a chaque waypoint via apply_correction() URScript.
+    Valide la taille du fichier produit contre URSCRIPT_MAX_BYTES ; retourne
+    False (et imprime un message d'echec) si depasse.
+    """
+    lines = _build_urscript_lines(cycles)
+    filename = Path(filename)
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
+    print(f'URScript exporte -> {filename}  ({len(lines)} lignes)')
+    return _validate_script_memory(filename, "URScript")
+
+
+def generate_urp(cycles, filename=URP_PATH):
+    """
+    Genere un fichier .urp (XML PolyScope) executable sur UR3/UR5/UR10.
+    Le URScript est encapsule dans la structure XML attendue par PolyScope 3.x et 5.x.
+    Reutilise _build_urscript_lines() : inclut le sondage de surface 3 points.
+    """
+    import xml.etree.ElementTree as ET
+    from xml.dom import minidom
+
+    script_lines = _build_urscript_lines(cycles)
+    script_content = '\n'.join(script_lines)
+
+    # Structure XML .urp (compatible PolyScope 3.x et 5.x)
+    root = ET.Element('program')
+    root.set('version', '6.0')
+
+    robot = ET.SubElement(root, 'robot')
+    robot.set('speed', '100')
+    robot.set('acceleration', '100')
+
+    script_node = ET.SubElement(robot, 'script')
+    script_node.text = script_content
+
+    # Serialisation XML avec indentation
+    xml_str = minidom.parseString(ET.tostring(root, encoding='unicode')) \
+                     .toprettyxml(indent='  ', encoding=None)
+    # Retirer la ligne <?xml version... ?> que PolyScope n'attend pas toujours
+    xml_lines = xml_str.split('\n')
+    if xml_lines[0].startswith('<?xml'):
+        xml_lines = xml_lines[1:]
+    xml_out = '\n'.join(xml_lines)
+
+    filename = Path(filename)
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write(xml_out)
+    print(f'URP exporte -> {filename}')
+    return _validate_script_memory(filename, "URP")
+
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="UR5 etalement - simulation & export")
+    parser.add_argument('--export',     action='store_true', help='Exporter le URScript (.script)')
+    parser.add_argument('--export-urp', action='store_true', help='Exporter le programme PolyScope (.urp)')
+    parser.add_argument('--no-show', action='store_true', help='Ne pas afficher les graphiques')
+    args = parser.parse_args()
+
+    cycles = build_full_trajectory()
+
+    exit_code = 0
+    if args.export:
+        if not generate_urscript(cycles):
+            exit_code = 1
+    if args.export_urp:
+        if not generate_urp(cycles):
+            exit_code = 1
+
+    if not args.no_show:
+        plot_static(cycles)
+        plot_overlay(cycles)
+        plt.show()
+    return exit_code
+
+
+if __name__ == '__main__':
+    import sys
+    sys.exit(main() or 0)

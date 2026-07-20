@@ -1,0 +1,39 @@
+{
+  "include": [
+    "ur5_etalementv6.py",
+    "ur5_sim",
+    "tests",
+    "run_validate.py",
+    "validate_etalement.py"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "meshes",
+    "**/*.bak"
+  ],
+  "pythonVersion": "3.13",
+  "pythonPlatform": "Windows",
+  "typeCheckingMode": "basic",
+  "useLibraryCodeForTypes": true,
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": "none",
+  "reportUnknownMemberType": "none",
+  "reportUnknownVariableType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportUnknownParameterType": "none",
+  "reportUnknownLambdaType": "none",
+  "reportMissingTypeArgument": "none",
+  "reportMissingParameterType": "none",
+  "reportGeneralTypeIssues": "warning",
+  "reportPrivateImportUsage": "warning",
+  "reportConstantRedefinition": "none",
+  "reportAttributeAccessIssue": "warning",
+  "reportArgumentType": "warning",
+  "reportCallIssue": "warning",
+  "reportAssignmentType": "warning",
+  "reportInvalidTypeForm": "warning",
+  "reportPossiblyUnboundVariable": "warning",
+  "strictListInference": false,
+  "strictDictionaryInference": false,
+  "strictSetInference": false
+}
