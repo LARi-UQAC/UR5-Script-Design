@@ -40,12 +40,13 @@ Today the exporter produces one pair of artifacts:
 depends on any other export target.
 
 A second, additive export option is planned (tracked in
-[issue #1](https://github.com/LARi-UQAC/UR5-Script-Design/issues/1)): `etalement_acq.script`
-/ `etalement_acq.urp`, the same spread program with a 50 Hz TCP force/pose data logger
-attached (background thread on the robot, CSV written to the USB key once the run
-completes). It does not replace or modify `etalement.script` / `etalement.urp`; both
-pairs will keep being generated side by side, and the simulator keeps using the plain
-`etalement.script`.
+[issue #6](https://github.com/LARi-UQAC/UR5-Script-Design/issues/6), full design in
+[docs/superpower/plans/plan_acq_datalogger.md](docs/superpower/plans/plan_acq_datalogger.md)):
+`etalement_acq.script` / `etalement_acq.urp`, the same spread program with a 50 Hz TCP
+force/pose data logger attached (background thread on the robot, CSV written to the USB
+key once the run completes). It does not replace or modify `etalement.script` /
+`etalement.urp`; both pairs will keep being generated side by side, and the simulator
+keeps using the plain `etalement.script`.
 
 ## Dependencies
 

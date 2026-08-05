@@ -11,6 +11,15 @@ Tooling around the ISO/COLIPA cosmetic-spread protocol executed on a Universal R
 
 The Swift viewer streams the live TCP to the design UI over UDP loopback (`ur5_sim/ipc_config.py`, port 47811); the old `tcp_live/tcp_live.json` file IPC is retired.
 
+## Plans and specs
+
+Every plan (design-doc produced by plan mode, or written ahead of a feature) goes in
+`docs/superpower/plans/plan_<topic>.md`. A matching specification, when one exists, goes
+in `docs/superpower/specs/spec_<topic>.md`. Do not leave a plan at the repo root or in
+`~/.claude/plans/` once work starts on it; move or copy it into `docs/superpower/plans/`
+so it stays with the code it describes and survives outside the local Claude Code plan
+history. Cross-link a plan and its spec by relative path when both exist.
+
 ## Common commands
 
 ```bash
