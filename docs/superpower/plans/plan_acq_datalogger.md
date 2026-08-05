@@ -52,6 +52,22 @@ consuming `etalement.script` only — nothing changes on the sim side.
    Sources: [Robotiq FT Sensor Instruction Manual](https://assets.robotiq.com/website-assets/support_documents/document/FT_Sensor_Instruction_Manual_PDF_20181218.pdf),
    [FT Sensor Installation (PolyScope tab path, min. version 3.5)](https://assets.robotiq.com/website-assets/support_documents/document/online/FT_Sensor_Instruction_Manual_Web_20181218.zip/FT_Sensor_Instruction_Manual_Web/Content/Installation.htm),
    [Export Data from FT 300 and FT 150 (port 63351, DoF forum)](https://dof.robotiq.com/discussion/494/export-data-from-ft-300-and-ft-150).
+4. **Lab network topology** — ANSWERED (2026-08-05): the UR5 controller is wired to an
+   IE5000 industrial switch, port 8, VLAN 4, static IP `192.168.4.25` (mask reported as
+   `/38` — not a valid IPv4 prefix length, max is `/32`; flagging as a likely typo for
+   `/28` or `/24`, to confirm against the switch config before relying on the subnet
+   size). VLAN 4 has **no DHCP and no Internet route** — confirms the plan's core premise
+   (§ Context: "no lab PC can reach it" from outside, everything must run on-controller).
+   Switch port 4 is free and lives on the same VLAN 4: a laptop wired there with a static
+   IP in the `192.168.4.0/xx` range (mask to confirm) gets direct L2 access to the
+   controller at `192.168.4.25` without touching Wi-Fi. Wi-Fi (`laimi-robot`) exists but
+   conflicts with other local networks and is unreliable — wired port 4 is the
+   recommended access path for any bring-up work. Not yet verified: FT-300 streaming on
+   port 63351 (§0.3) has not been tested from this network path; user is testing it
+   2026-08-06. This does not change the daemon design (still on-controller, no
+   dependency on an external PC being reachable), but a working port-4 laptop link is a
+   fast way to `nc 192.168.4.25 63351` or `telnet` and confirm the FT-300 wire format
+   ahead of the on-robot smoke test (§7), instead of finding out only during it.
 
 ## 1. Validation of the original prompt — issues found (CB3 / PolyScope 3.x facts)
 
