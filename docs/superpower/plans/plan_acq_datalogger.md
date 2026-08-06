@@ -1,12 +1,22 @@
-# Plan — 50 Hz force/pose data logger for UR5 CB3 (URScript + on-controller CSV daemon)
+# Plan — 50 Hz force/pose data logger for UR5 CB3 (on-robot main path + RTDE fallback monitor)
 
 ## Context
 
 Experimental need: record TCP force (Fx,Fy,Fz) and TCP position (X,Y,Z) at 50 Hz during the
 ISO/COLIPA spread protocol runs on the UR5 CB3 (RobotIQ FT-300 + 2F-85 passive finger),
-20-30 trials of ~3 min each, one uniquely named CSV per trial saved to the robot's USB key.
-The robot is on a protected subnet: **no lab PC can reach it** (no RTDE, no external
-listener). Everything must run on the controller itself.
+20-30 trials of ~3 min each, one uniquely named CSV per trial.
+
+**Correction (2026-08-06)**: an earlier version of this plan assumed no lab PC could
+reach the controller at all. That is now known to be wrong in one specific way: the
+robot controller and a lab computer sit on the **same** isolated VLAN (IE5000 switch,
+VLAN 4, no DHCP, no Internet route — §0.4) and *can* reach each other once the computer
+is wired to switch port 4 with a static IP in the same subnet. Robot: `192.168.4.38`
+(switch port 8). Computer: `192.168.4.14` (switch port 4). This does not change the
+**main** path (still fully on-controller, so acquisition never depends on a second
+machine being present, wired, or working), but it makes a genuine **fallback** path
+possible: a small stdlib-only CLI on the lab computer that passively monitors the
+robot's RTDE stream (port 30004) and writes its own CSV. **Both paths are required
+deliverables of this plan**, not an either/or choice — see §2 (main) and §2b (fallback).
 
 The original prompt (kept in section 10) asked for a pure-URScript solution that buffers
 11700 samples and writes `/ramdisk/usb/ACQ_log_YYYYMMDD_HHMMSS.csv`. Validation against
@@ -17,7 +27,9 @@ corrected, feasible design that preserves every requirement's intent.
 / `etalement.urp` is **not modified in any way**. The exporter additionally produces a
 second pair, `etalement_acq.script` / `etalement_acq.urp`, which is the original program
 plus the data-acquisition process. The simulator (`ur5_sim --check/--visualize`) keeps
-consuming `etalement.script` only — nothing changes on the sim side.
+consuming `etalement.script` only — nothing changes on the sim side. This applies to the
+main path only; the RTDE fallback monitor is a separate, independent program that never
+touches `etalement*.script/.urp` or the simulator.
 
 ## 0. Questions to ask the user at execution start (blocking, per prompt requirement)
 
@@ -52,22 +64,44 @@ consuming `etalement.script` only — nothing changes on the sim side.
    Sources: [Robotiq FT Sensor Instruction Manual](https://assets.robotiq.com/website-assets/support_documents/document/FT_Sensor_Instruction_Manual_PDF_20181218.pdf),
    [FT Sensor Installation (PolyScope tab path, min. version 3.5)](https://assets.robotiq.com/website-assets/support_documents/document/online/FT_Sensor_Instruction_Manual_Web_20181218.zip/FT_Sensor_Instruction_Manual_Web/Content/Installation.htm),
    [Export Data from FT 300 and FT 150 (port 63351, DoF forum)](https://dof.robotiq.com/discussion/494/export-data-from-ft-300-and-ft-150).
-4. **Lab network topology** — ANSWERED (2026-08-05): the UR5 controller is wired to an
-   IE5000 industrial switch, port 8, VLAN 4, static IP `192.168.4.25` (mask reported as
-   `/38` — not a valid IPv4 prefix length, max is `/32`; flagging as a likely typo for
-   `/28` or `/24`, to confirm against the switch config before relying on the subnet
-   size). VLAN 4 has **no DHCP and no Internet route** — confirms the plan's core premise
-   (§ Context: "no lab PC can reach it" from outside, everything must run on-controller).
-   Switch port 4 is free and lives on the same VLAN 4: a laptop wired there with a static
-   IP in the `192.168.4.0/xx` range (mask to confirm) gets direct L2 access to the
-   controller at `192.168.4.25` without touching Wi-Fi. Wi-Fi (`laimi-robot`) exists but
-   conflicts with other local networks and is unreliable — wired port 4 is the
-   recommended access path for any bring-up work. Not yet verified: FT-300 streaming on
-   port 63351 (§0.3) has not been tested from this network path; user is testing it
-   2026-08-06. This does not change the daemon design (still on-controller, no
-   dependency on an external PC being reachable), but a working port-4 laptop link is a
-   fast way to `nc 192.168.4.25 63351` or `telnet` and confirm the FT-300 wire format
-   ahead of the on-robot smoke test (§7), instead of finding out only during it.
+4. **Lab network topology** — ANSWERED (2026-08-05, IPs corrected 2026-08-06): the UR5
+   controller is wired to an IE5000 industrial switch, port 8, VLAN 4, static IP
+   **`192.168.4.38`**. VLAN 4 has **no DHCP and no Internet route**. Switch port 4 is
+   free and lives on the same VLAN 4: the lab computer wired there has static IP
+   **`192.168.4.14`**, giving it direct L2 access to the controller. Subnet mask was not
+   given; both addresses are consistent with a `/24` (`192.168.4.0/24`), assumed here and
+   to be confirmed against the switch config before deployment. Wi-Fi (`laimi-robot`)
+   exists but conflicts with other local networks and is unreliable — wired port 4 is the
+   recommended (and only planned) access path. Not yet verified: FT-300 streaming on
+   port 63351 (§0.3) and RTDE on port 30004 (§0.5) have not been tested from this network
+   path; user is testing 2026-08-06. Neither test changes the main-path design (still
+   fully on-controller, no dependency on the lab computer being reachable), but a working
+   port-4 link is how the RTDE fallback (§2b) reaches the controller at all, and is a
+   fast way to `nc 192.168.4.38 63351` and confirm the FT-300 wire format ahead of the
+   on-robot smoke test (§7), instead of finding out only during it.
+5. **Can the robot's own data tell us start/stop, for automatic per-run file
+   boundaries?** — ANSWERED: **yes, on the RTDE path only.** RTDE (Real-Time Data
+   Exchange, TCP port 30004, available on this CB3/PolyScope 3.11 since RTDE requires
+   only PolyScope >= 3.3) exposes an output field named `runtime_state`, a `UINT32`
+   program-execution-state enum: `0` STOPPING, `1` STOPPED, `2` PLAYING (= running),
+   `3` PAUSING, `4` PAUSED, `5` RESUMING. Requesting `runtime_state` in the same output
+   recipe as `timestamp`, `actual_TCP_pose`, `actual_TCP_force` costs nothing extra: it
+   arrives in the same stream, no polling, no second connection. This directly answers
+   the "how do we know when a new trial starts" question and drives the fallback
+   monitor's automatic file boundaries (§2b): open a new CSV on a transition **into**
+   `PLAYING` from `STOPPED` (a genuine new run), keep the same file open across
+   `PAUSING`/`PAUSED`/`RESUMING` (still the same run), and close/finalize the file on a
+   transition **into** `STOPPED`. No manual "close current file, start new file" CLI
+   action is ever needed, matching the "automatic file creation, avoid manipulation"
+   requirement. The URScript main path does not need this signal at all: it already
+   knows its own start/stop deterministically (thread start/kill, §4.3/§4.4), so
+   `runtime_state` is fallback-only, read from the lab computer.
+   The Dashboard Server (`port 29999`, `running` query) was considered and rejected as
+   the sync signal: it is request/response text, would need its own polling loop and
+   connection, and gives strictly less information than the RTDE field already present
+   in the same stream we read for pose/force.
+   Sources: [RTDE Guide (docs.universal-robots.com), handshake and field types](https://docs.universal-robots.com/tutorials/communication-protocol-tutorials/rtde-guide.html),
+   [RTDE `runtime_state` enumeration, confirmed on real UR3 CB-series (UR forum)](https://forum.universal-robots.com/t/rtde-runtime-state-enumeration/6634).
 
 ## 1. Validation of the original prompt — issues found (CB3 / PolyScope 3.x facts)
 
@@ -105,6 +139,57 @@ URScript (data_logger thread, 50 Hz)
 - Repeat trials: each program run opens a new session -> new timestamped file; daemon adds
   `_1`, `_2` suffix on the (unlikely) same-second collision. No overwrite possible.
 
+## 2b. Fallback architecture (lab computer, RTDE, no internet/no pip)
+
+Independent of §2. Runs entirely on the lab computer (`192.168.4.14`); the robot side
+needs no change at all for this path (RTDE is a stock CB3 service, always listening).
+
+```
+Lab computer (192.168.4.14, wired to IE5000 port 4, same VLAN 4 as the robot)
+ └─ rtde_fallback_monitor.py   -> stdlib-only CLI, no GUI, connects OUT to the robot
+      1. TCP connect 192.168.4.38:30004 (RTDE)
+      2. handshake: RTDE_REQUEST_PROTOCOL_VERSION, then
+         RTDE_CONTROL_PACKAGE_SETUP_OUTPUTS "timestamp,actual_TCP_pose,
+         actual_TCP_force,runtime_state", then RTDE_CONTROL_PACKAGE_START
+      3. per RTDE_DATA_PACKAGE: unpack via struct (stdlib), keep timestamp +
+         pose[0:3] + force[0:3] + runtime_state
+      4. runtime_state transition STOPPED->PLAYING: open ACQ_rtde_YYYYMMDD_HHMMSS.csv
+         (computer's own wall clock -- reliable, unlike the isolated controller's)
+      5. runtime_state transition ->STOPPED: finalize + close current file
+      6. PAUSING/PAUSED/RESUMING: same file stays open, samples keep appending
+```
+
+- **No internet, no pip on this network**: the official `ur_rtde` client library is not
+  installable here. The RTDE wire protocol is simple enough to hand-implement with
+  stdlib only (`socket`, `struct`, `csv`, `datetime`) -- 2-byte size + 1-byte type
+  header, then a body whose field layout is fixed once the output recipe is
+  acknowledged (`DOUBLE`, `VECTOR6D` = 6 doubles, `UINT32`, all standard `struct` format
+  codes). No third-party dependency at any point.
+- **Sampling rate**: RTDE output frequency is requested as a divisor of the
+  controller's base control-loop rate; the exact base rate for this CB3/PolyScope 3.11
+  build (125 Hz historically for CB3, vs 500 Hz documented for e-Series) is not
+  confirmed from public docs for this specific build. Rather than gamble on a divisor
+  formula, the monitor requests the recipe at the server's default (full) rate and
+  software-decimates to a 20 ms cadence using each packet's own `timestamp` field --
+  the same tick-driven approach as the URScript thread (§4.3), so both paths are
+  timestamp-exact regardless of the underlying base rate. Confirm the actual base rate
+  empirically on first connect (log the raw inter-packet interval once) and revisit
+  requesting a direct-frequency recipe as an optimization if it proves reliable.
+- **Schema kept identical to the main path** (this plan's reading of "same variables to
+  monitor" -- flag for correction if a literal shared-memory link between the two
+  separate machines was intended instead, which is not physically meaningful): same
+  seven columns `Time,ForceX,ForceY,ForceZ,PoseX,PoseY,PoseZ`, same metadata block
+  shape (§5), with one added metadata line identifying the source (`# Data Source: RTDE
+  fallback monitor (192.168.4.14)`) so a file is never mistaken for the other path's
+  output. Filename prefix `ACQ_rtde_` (vs `ACQ_log_` on-robot) keeps the two paths from
+  ever colliding if both outputs land in the same folder.
+- **Redundancy, not either/or**: both paths can run at the same time during
+  commissioning (main path saves to the robot's USB, fallback saves to the lab
+  computer) purely for cross-validation; neither depends on the other being active.
+- **Read-only toward the robot**: the monitor only ever reads the RTDE output stream.
+  It sends no motion command, no register write, nothing that could affect the running
+  program -- safe to leave connected indefinitely.
+
 ## 3. Deliverables (new `datalogger/` folder + additive changes in `design/`)
 
 | File | Content |
@@ -117,6 +202,8 @@ URScript (data_logger thread, 50 Hz)
 | `datalogger/README.md` | Deployment procedure (USB insertion, daemon check, load `etalement_acq.script`, run, retrieve CSV), version-dependency notes, FT-300 vs `get_tcp_force()` switch, and the rule: simulation always uses `etalement.script`. |
 | `tests/test_acq_logger_daemon.py` | stdlib `unittest`, offline: fake FT-300 server + fake URScript client on loopback; asserts CSV metadata block, header `Time,ForceX,ForceY,ForceZ,PoseX,PoseY,PoseZ`, row count == sent count, no trailing preallocated rows, filename format, collision suffix, STOP handshake, buffer cap at 11700 with clean auto-stop. Must run on Windows dev machine (pure sockets, temp dir as fake USB). Daemon code stays Python-2.7-valid but the test may run it under the project venv's Python 3 — write it 2/3-compatible (no f-strings, `print()` function, etc.). |
 | `tests/test_acq_export.py` | Three guarantees: (1) **regression** — lines produced for `etalement.script` are identical with and without the acq feature present (original untouched); (2) **equivalence** — `parse_poses(etalement_acq.script)` returns exactly the same 4-tuples as `parse_poses(etalement.script)` (lenient parser ignores the thread block; motion unchanged); (3) **content** — acq script contains the thread def, `keep_logging`, bounds guard `log_index < ACQ_MAX_SAMPLES`, socket open before motion, STOP after retreat, and no `movel`/`stopl`/slicing inside the thread block. Memory budget asserted on the acq file too. |
+| `datalogger/rtde_fallback_monitor.py` | **Fallback path (§2b)**. Python 3, stdlib only (`socket`, `struct`, `csv`, `datetime`, `argparse`, `sys`) -- no pip, no internet on VLAN 4. CLI, no GUI. Connects to `--host 192.168.4.38 --port 30004`, hand-rolled RTDE handshake + recipe (`timestamp,actual_TCP_pose,actual_TCP_force,runtime_state`), decimates to 20 ms via packet timestamps, auto-opens/closes `ACQ_rtde_YYYYMMDD_HHMMSS.csv` on `runtime_state` transitions (STOPPED<->PLAYING), keeps the file open across PAUSED/RESUMING, preserves partial data and logs a clear diagnostic on disconnect mid-run instead of silently dropping it. |
+| `tests/test_rtde_fallback_monitor.py` | stdlib `unittest`, offline: a fake RTDE server (loopback socket) replays the documented handshake and a scripted sequence of `RTDE_DATA_PACKAGE` frames with a chosen `runtime_state` sequence. Asserts: correct field unpacking, one CSV per STOPPED->PLAYING->STOPPED cycle, PAUSED/RESUMING does not split a file, filename prefix and metadata "Data Source" line, decimation lands on ~20 ms steps, and a mid-stream socket close leaves the partial file intact with a logged warning (no data silently lost). |
 
 ## 4. Acquisition block design (emitted into `etalement_acq.script` by `_build_acq_lines`)
 
@@ -191,9 +278,19 @@ Time,ForceX,ForceY,ForceZ,PoseX,PoseY,PoseZ
 8. `python -m ur5_sim --check` against `etalement.script` — unchanged behavior (sim
    never reads the acq file).
 9. `pip-audit -r requirements.txt` (no new deps expected — daemon is stdlib).
+10. `datalogger/rtde_fallback_monitor.py` + `tests/test_rtde_fallback_monitor.py`
+    (TDD: fake RTDE server on loopback; run
+    `python -m unittest tests.test_rtde_fallback_monitor -v`). Independent of steps 1-9;
+    can be built in parallel with the main path.
+11. Update `datalogger/README.md` with the fallback's deployment procedure: wire the
+    lab computer to IE5000 port 4, set static IP `192.168.4.14/24`, confirm reachability
+    (`ping 192.168.4.38`), run `python rtde_fallback_monitor.py`, start a trial from the
+    pendant, confirm a CSV appears automatically with no manual file action.
 
 Simulation stays exactly as today: `ur5_sim` consumes `etalement.script` only. The acq
 twin is robot-only; `test_acq_export.py` guarantee (2) proves its motion is identical.
+The RTDE fallback monitor never touches `etalement*.script/.urp`, `ur5_sim`, or the
+design UI -- it is a standalone read-only client of the robot's RTDE service.
 
 ## 7. Verification
 
@@ -212,6 +309,20 @@ On robot (procedure in README, user executes):
 4. Two back-to-back trials: two distinct filenames.
 5. Pull USB out only between trials.
 
+Fallback path, offline (dev machine):
+- `python -m unittest tests.test_rtde_fallback_monitor -v` — handshake parsing, auto
+  file boundaries on `runtime_state` transitions, decimation, partial-file preservation.
+
+Fallback path, on the lab network (2026-08-06 test session):
+1. Wire the lab computer to IE5000 port 4, set static IP `192.168.4.14/24`.
+2. `ping 192.168.4.38` — confirms L2/L3 reachability before touching RTDE or FT-300.
+3. Run `rtde_fallback_monitor.py`; start a trial from the pendant (main path can run
+   at the same time); confirm a `ACQ_rtde_*.csv` appears automatically, no CLI action.
+4. Pause and resume the program from the pendant mid-trial: confirm the file does NOT
+   split into two.
+5. Stop the trial: confirm the file closes; start a second trial: confirm a second,
+   distinct file opens automatically.
+
 ## 8. Risks and mitigations
 
 - **urmagic runs as root**: script is 5 lines, stdlib daemon, no network beyond loopback;
@@ -226,6 +337,22 @@ On robot (procedure in README, user executes):
   sample → worst-case 10 ms skew; acceptable for the 6 N spread analysis; documented.
 - **PolyScope version**: confirmed 3.11.0.82155 (Aug 2019), CB3 — resolved, no
   outstanding version risk (§0.1).
+- **Lab computer may not already have Python installed**: no internet on VLAN 4 means
+  no installer download while wired to port 4. Python (3.x, any recent stdlib-complete
+  install) must already be present, or installed beforehand while the machine is on a
+  normal network -- confirm before the 2026-08-06 test session, not during it.
+- **RTDE base output rate for this exact CB3 build is unconfirmed** (§2b): monitor
+  decimates from whatever full rate the controller streams rather than requesting an
+  assumed divisor, so this does not block correctness, only removes a possible
+  optimization (requesting the exact rate server-side) until confirmed on first connect.
+- **RTDE field name mismatch**: if `runtime_state` or another requested field is not
+  supported on this build, RTDE returns type `NOT_FOUND` for it at recipe setup
+  (documented, clean failure) rather than silently mis-parsing -- the monitor must check
+  for this at connect time and abort with a clear message, not start logging garbage.
+- **Two independent writers, one VLAN**: main path (robot -> USB) and fallback (lab
+  computer -> its own disk) never share a file or a socket, so a fault in one cannot
+  corrupt the other's output; the only shared resource is the physical network link,
+  and the monitor is read-only so it cannot degrade the robot side even if it misbehaves.
 
 ## 9. Requirement traceability (prompt -> plan)
 
@@ -240,6 +367,9 @@ On robot (procedure in README, user executes):
 - File-open validation, meaningful diagnostics, preserve data on failure, close+verify ->
   daemon try/except + fsync + status reply + RAM retention + RETRY (§3, §4.5).
 - Version-dependent behavior documented -> §4.6 notes block + README.
+- Both main and fallback paths implemented, not either/or -> §2 + §2b, §3, §6 steps 1-11.
+- Automatic per-run file creation without manual CLI action -> §0.5/§2b, `runtime_state`
+  transition detection (STOPPED<->PLAYING, PAUSED keeps the file open).
 
 ## 10. Original prompt
 

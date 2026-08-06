@@ -46,7 +46,10 @@ A second, additive export option is planned (tracked in
 force/pose data logger attached (background thread on the robot, CSV written to the USB
 key once the run completes). It does not replace or modify `etalement.script` /
 `etalement.urp`; both pairs will keep being generated side by side, and the simulator
-keeps using the plain `etalement.script`.
+keeps using the plain `etalement.script`. A second, independent fallback is also
+planned: a stdlib-only CLI on a lab computer wired to the same isolated VLAN, passively
+reading the robot's RTDE stream and writing its own CSV with automatic per-run file
+boundaries. Neither path depends on the other.
 
 ## Dependencies
 
