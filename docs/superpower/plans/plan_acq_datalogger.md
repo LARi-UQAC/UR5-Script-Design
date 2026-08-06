@@ -139,32 +139,66 @@ URScript (data_logger thread, 50 Hz)
 - Repeat trials: each program run opens a new session -> new timestamped file; daemon adds
   `_1`, `_2` suffix on the (unlikely) same-second collision. No overwrite possible.
 
-## 2b. Fallback architecture (lab computer, RTDE, no internet/no pip)
+## 2b. Fallback architecture (lab computer, RTDE, compiled executable)
 
-Independent of §2. Runs entirely on the lab computer (`192.168.4.14`); the robot side
-needs no change at all for this path (RTDE is a stock CB3 service, always listening).
+Independent of §2. Runs entirely on the lab computer (`192.168.4.14`, confirmed
+**Windows**, no Python installed, PowerShell availability uncertain, `cmd.exe`
+confirmed available); the robot side needs no change at all for this path (RTDE is a
+stock CB3 service, always listening).
+
+**Language: C, compiled to a static, standalone `.exe`.** Decided over PowerShell (an
+earlier draft of this plan) because PowerShell version/availability on that specific
+machine is not certain, whereas a statically-linked executable has no runtime
+dependency at all beyond `cmd.exe`, which is confirmed present. Decided over Rust:
+MinGW-w64 `gcc` is already installed and on `PATH` on this dev machine (verified), so
+building starts with zero new toolchain setup; Rust would need `rustup`/`cargo`
+installed first. Build on this dev machine (which has internet), copy only the
+resulting single `.exe` to the lab computer -- nothing else ships, no DLLs (static
+link), no install step there.
 
 ```
-Lab computer (192.168.4.14, wired to IE5000 port 4, same VLAN 4 as the robot)
- └─ rtde_fallback_monitor.py   -> stdlib-only CLI, no GUI, connects OUT to the robot
-      1. TCP connect 192.168.4.38:30004 (RTDE)
+Lab computer (192.168.4.14, wired to IE5000 port 4, same VLAN 4 as the robot, cmd.exe)
+ └─ rtde_fallback_monitor.exe   -> single static binary, no GUI, connects OUT to the robot
+      run from cmd:  rtde_fallback_monitor.exe 192.168.4.38 30004 .
+      1. Winsock2 TCP connect to 192.168.4.38:30004 (RTDE)
       2. handshake: RTDE_REQUEST_PROTOCOL_VERSION, then
          RTDE_CONTROL_PACKAGE_SETUP_OUTPUTS "timestamp,actual_TCP_pose,
          actual_TCP_force,runtime_state", then RTDE_CONTROL_PACKAGE_START
-      3. per RTDE_DATA_PACKAGE: unpack via struct (stdlib), keep timestamp +
-         pose[0:3] + force[0:3] + runtime_state
+      3. per RTDE_DATA_PACKAGE: unpack via a hand-written big-endian reader (see
+         below), keep timestamp + pose[0:3] + force[0:3] + runtime_state
       4. runtime_state transition STOPPED->PLAYING: open ACQ_rtde_YYYYMMDD_HHMMSS.csv
          (computer's own wall clock -- reliable, unlike the isolated controller's)
       5. runtime_state transition ->STOPPED: finalize + close current file
       6. PAUSING/PAUSED/RESUMING: same file stays open, samples keep appending
 ```
 
-- **No internet, no pip on this network**: the official `ur_rtde` client library is not
-  installable here. The RTDE wire protocol is simple enough to hand-implement with
-  stdlib only (`socket`, `struct`, `csv`, `datetime`) -- 2-byte size + 1-byte type
-  header, then a body whose field layout is fixed once the output recipe is
-  acknowledged (`DOUBLE`, `VECTOR6D` = 6 doubles, `UINT32`, all standard `struct` format
-  codes). No third-party dependency at any point.
+- **Build**: `gcc -O2 -static -o rtde_fallback_monitor.exe rtde_fallback_monitor.c
+  -lws2_32` (Winsock2 import lib; `ws2_32.dll` itself is a core Windows system DLL
+  present on every Windows install, not a dependency concern -- `-static` only needs
+  to cover the MinGW C runtime, which it does). Build instructions and the exact
+  command live in `datalogger/README.md`; no Makefile needed for one source file.
+  No internet or install is needed for this step on the lab computer -- it only
+  receives the already-built `.exe`.
+- **No `ur_rtde` library usage of any kind** (C++ or Python): the RTDE wire protocol
+  is hand-implemented directly with Winsock2 (`socket`, `connect`, `send`, `recv`) --
+  2-byte size + 1-byte type header, then a body whose field layout is fixed once the
+  output recipe is acknowledged (`DOUBLE` = 8 bytes, `VECTOR6D` = 6 doubles, `UINT32`
+  = 4 bytes).
+- **Endianness**: RTDE is big-endian (network byte order); x86/x64 is little-endian.
+  Every multi-byte field goes through one small, tested helper pair --
+  `uint32_t read_be_u32(const unsigned char *p)` and
+  `double read_be_double(const unsigned char *p)` (byte-reverse into a local buffer,
+  then `memcpy` into the target type -- never a pointer-cast, which would be
+  undefined behavior/strict-aliasing UB in C). Every field decode goes through these
+  two functions, never an inline cast, so there is exactly one place to get this
+  right and exactly one place the tests need to pin down with known byte sequences.
+- **CSV writing**: plain `fopen`/`fprintf`/`fclose`, matching the main path's exact
+  header `Time,ForceX,ForceY,ForceZ,PoseX,PoseY,PoseZ` and metadata block (§5) with
+  one added line identifying the source.
+- **Unsigned-executable warning**: an `.exe` copied from removable media and run for
+  the first time can trigger Windows SmartScreen ("Windows protected your PC");
+  documented in the README as an expected one-time "More info -> Run anyway" click,
+  not a failure.
 - **Sampling rate**: RTDE output frequency is requested as a divisor of the
   controller's base control-loop rate; the exact base rate for this CB3/PolyScope 3.11
   build (125 Hz historically for CB3, vs 500 Hz documented for e-Series) is not
@@ -202,8 +236,9 @@ Lab computer (192.168.4.14, wired to IE5000 port 4, same VLAN 4 as the robot)
 | `datalogger/README.md` | Deployment procedure (USB insertion, daemon check, load `etalement_acq.script`, run, retrieve CSV), version-dependency notes, FT-300 vs `get_tcp_force()` switch, and the rule: simulation always uses `etalement.script`. |
 | `tests/test_acq_logger_daemon.py` | stdlib `unittest`, offline: fake FT-300 server + fake URScript client on loopback; asserts CSV metadata block, header `Time,ForceX,ForceY,ForceZ,PoseX,PoseY,PoseZ`, row count == sent count, no trailing preallocated rows, filename format, collision suffix, STOP handshake, buffer cap at 11700 with clean auto-stop. Must run on Windows dev machine (pure sockets, temp dir as fake USB). Daemon code stays Python-2.7-valid but the test may run it under the project venv's Python 3 — write it 2/3-compatible (no f-strings, `print()` function, etc.). |
 | `tests/test_acq_export.py` | Three guarantees: (1) **regression** — lines produced for `etalement.script` are identical with and without the acq feature present (original untouched); (2) **equivalence** — `parse_poses(etalement_acq.script)` returns exactly the same 4-tuples as `parse_poses(etalement.script)` (lenient parser ignores the thread block; motion unchanged); (3) **content** — acq script contains the thread def, `keep_logging`, bounds guard `log_index < ACQ_MAX_SAMPLES`, socket open before motion, STOP after retreat, and no `movel`/`stopl`/slicing inside the thread block. Memory budget asserted on the acq file too. |
-| `datalogger/rtde_fallback_monitor.py` | **Fallback path (§2b)**. Python 3, stdlib only (`socket`, `struct`, `csv`, `datetime`, `argparse`, `sys`) -- no pip, no internet on VLAN 4. CLI, no GUI. Connects to `--host 192.168.4.38 --port 30004`, hand-rolled RTDE handshake + recipe (`timestamp,actual_TCP_pose,actual_TCP_force,runtime_state`), decimates to 20 ms via packet timestamps, auto-opens/closes `ACQ_rtde_YYYYMMDD_HHMMSS.csv` on `runtime_state` transitions (STOPPED<->PLAYING), keeps the file open across PAUSED/RESUMING, preserves partial data and logs a clear diagnostic on disconnect mid-run instead of silently dropping it. |
-| `tests/test_rtde_fallback_monitor.py` | stdlib `unittest`, offline: a fake RTDE server (loopback socket) replays the documented handshake and a scripted sequence of `RTDE_DATA_PACKAGE` frames with a chosen `runtime_state` sequence. Asserts: correct field unpacking, one CSV per STOPPED->PLAYING->STOPPED cycle, PAUSED/RESUMING does not split a file, filename prefix and metadata "Data Source" line, decimation lands on ~20 ms steps, and a mid-stream socket close leaves the partial file intact with a logged warning (no data silently lost). |
+| `datalogger/rtde_fallback_monitor.c` | **Fallback path (§2b)**. C, Winsock2, no external dependency beyond the OS -- no Python, no PowerShell, no pip, no internet, no install of any kind on the lab computer. CLI, no GUI. Args `rtde_fallback_monitor.exe <robot-ip> <rtde-port> <out-dir>`. Hand-rolled RTDE handshake + recipe (`timestamp,actual_TCP_pose,actual_TCP_force,runtime_state`), big-endian decode via `read_be_u32`/`read_be_double` (§2b), decimates to 20 ms via packet timestamps, auto-opens/closes `ACQ_rtde_YYYYMMDD_HHMMSS.csv` on `runtime_state` transitions (STOPPED<->PLAYING), keeps the file open across PAUSED/RESUMING, preserves partial data and prints a clear diagnostic on disconnect mid-run instead of silently dropping it. Parsing/decision logic (byte decode, state-transition action, CSV row formatting) factored into small pure functions, each callable without a live socket, specifically so the tests below can exercise them directly. |
+| `datalogger/build.bat` | One-liner: `gcc -O2 -static -o rtde_fallback_monitor.exe rtde_fallback_monitor.c -lws2_32`. Run on the dev machine (has `gcc`/internet); only the resulting `.exe` is copied to the lab computer. |
+| `datalogger/tests/test_rtde_fallback_monitor.c` | Hand-rolled C test harness (no framework -- matches the project's "no CI, run manually" ethos and needs zero new dependency), `assert()`-based, non-zero exit on any failure. Two layers: (1) **unit** -- known byte sequences through `read_be_u32`/`read_be_double` against expected values (endianness correctness, pinned down once); state-transition table (`STOPPED->PLAYING`=OPEN, `PLAYING->PAUSED`=NONE, `PAUSED->PLAYING`=NONE, `PLAYING->STOPPED`=CLOSE, etc.) exercised for every pair, not just the happy path. (2) **integration** -- a local Winsock2 `TcpListener` on `127.0.0.1` in the test binary itself replays the documented RTDE handshake and a scripted `runtime_state` sequence; asserts one CSV per run, correct header/schema, decimation close to 20 ms, and that a forced mid-stream socket close leaves the partial file intact with a diagnostic printed (not silently dropped). Built and run via `datalogger/tests/build_and_run_tests.bat` (same `gcc -static ... -lws2_32` pattern); **separate from** `python -m unittest discover`, documented as the one C-language exception to this repo's otherwise Python test suite (forced by the target machine having no Python and uncertain PowerShell). |
 
 ## 4. Acquisition block design (emitted into `etalement_acq.script` by `_build_acq_lines`)
 
@@ -278,14 +313,20 @@ Time,ForceX,ForceY,ForceZ,PoseX,PoseY,PoseZ
 8. `python -m ur5_sim --check` against `etalement.script` — unchanged behavior (sim
    never reads the acq file).
 9. `pip-audit -r requirements.txt` (no new deps expected — daemon is stdlib).
-10. `datalogger/rtde_fallback_monitor.py` + `tests/test_rtde_fallback_monitor.py`
-    (TDD: fake RTDE server on loopback; run
-    `python -m unittest tests.test_rtde_fallback_monitor -v`). Independent of steps 1-9;
-    can be built in parallel with the main path.
-11. Update `datalogger/README.md` with the fallback's deployment procedure: wire the
-    lab computer to IE5000 port 4, set static IP `192.168.4.14/24`, confirm reachability
-    (`ping 192.168.4.38`), run `python rtde_fallback_monitor.py`, start a trial from the
-    pendant, confirm a CSV appears automatically with no manual file action.
+10. `datalogger/rtde_fallback_monitor.c` + `datalogger/tests/test_rtde_fallback_monitor.c`
+    + `datalogger/build.bat` / `datalogger/tests/build_and_run_tests.bat` (TDD: fake
+    RTDE listener on loopback, built with the project's already-installed
+    MinGW-w64 `gcc`). Independent of steps 1-9; can be built in parallel with the main
+    path. C, not Python -- the only language-exception deliverable in this plan (§2b:
+    no Python and uncertain PowerShell on the target machine; a static `.exe` sidesteps
+    both).
+11. Update `datalogger/README.md` with the fallback's deployment procedure: build on
+    the dev machine, wire the lab computer to IE5000 port 4, set static IP
+    `192.168.4.14/24` (subnet mask to be confirmed on-site at deployment, not blocking
+    this plan -- see §8), confirm reachability (`ping 192.168.4.38`), copy only the
+    `.exe`, run `rtde_fallback_monitor.exe 192.168.4.38 30004 .` from `cmd.exe`, start
+    a trial from the pendant, confirm a CSV appears automatically with no manual file
+    action.
 
 Simulation stays exactly as today: `ur5_sim` consumes `etalement.script` only. The acq
 twin is robot-only; `test_acq_export.py` guarantee (2) proves its motion is identical.
@@ -310,14 +351,18 @@ On robot (procedure in README, user executes):
 5. Pull USB out only between trials.
 
 Fallback path, offline (dev machine):
-- `python -m unittest tests.test_rtde_fallback_monitor -v` — handshake parsing, auto
-  file boundaries on `runtime_state` transitions, decimation, partial-file preservation.
+- `datalogger\tests\build_and_run_tests.bat` — handshake parsing, big-endian
+  unpacking (known-value pinned), auto file boundaries on every `runtime_state`
+  transition pair, decimation, partial-file preservation.
 
 Fallback path, on the lab network (2026-08-06 test session):
 1. Wire the lab computer to IE5000 port 4, set static IP `192.168.4.14/24`.
 2. `ping 192.168.4.38` — confirms L2/L3 reachability before touching RTDE or FT-300.
-3. Run `rtde_fallback_monitor.py`; start a trial from the pendant (main path can run
-   at the same time); confirm a `ACQ_rtde_*.csv` appears automatically, no CLI action.
+3. Copy only `rtde_fallback_monitor.exe` (built on the dev machine) to the lab
+   computer; run from `cmd.exe`: `rtde_fallback_monitor.exe 192.168.4.38 30004 .`
+   (accept the one-time SmartScreen prompt if it appears); start a trial from the
+   pendant (main path can run at the same time); confirm a `ACQ_rtde_*.csv` appears
+   automatically, no CLI action.
 4. Pause and resume the program from the pendant mid-trial: confirm the file does NOT
    split into two.
 5. Stop the trial: confirm the file closes; start a second trial: confirm a second,
@@ -337,10 +382,24 @@ Fallback path, on the lab network (2026-08-06 test session):
   sample → worst-case 10 ms skew; acceptable for the 6 N spread analysis; documented.
 - **PolyScope version**: confirmed 3.11.0.82155 (Aug 2019), CB3 — resolved, no
   outstanding version risk (§0.1).
-- **Lab computer may not already have Python installed**: no internet on VLAN 4 means
-  no installer download while wired to port 4. Python (3.x, any recent stdlib-complete
-  install) must already be present, or installed beforehand while the machine is on a
-  normal network -- confirm before the 2026-08-06 test session, not during it.
+- **Lab computer has no Python, PowerShell version uncertain** (confirmed) -- resolved
+  by writing the fallback monitor in C, statically compiled to a single `.exe` (§2b).
+  Only runtime requirement is `cmd.exe` (confirmed present) and the core Windows
+  `ws2_32.dll`, both universal on any Windows version -- no PowerShell dependency at
+  all, so its version/availability on that machine no longer matters.
+- **Subnet mask for `192.168.4.14`**: not given; deferred to the on-site deployment
+  step (§6 step 11) rather than blocking this plan -- set from the switch's actual VLAN
+  4 config at that time, `/24` is the working assumption until then.
+- **Unsigned `.exe` from removable media triggers Windows SmartScreen** on first run:
+  documented as an expected one-time "More info -> Run anyway" click (§2b, §7), not a
+  failure to debug.
+- **Endianness bug in hand-rolled parsing**: RTDE is big-endian, x86/x64 is
+  little-endian; an unreversed field produces a plausible-looking but wrong number
+  instead of an error, and a raw pointer-cast instead of `memcpy` would additionally be
+  undefined behavior in C. Mitigated by centralizing every conversion through the two
+  tested `read_be_u32`/`read_be_double` helpers (§2b), with fixed known-value unit
+  tests in `test_rtde_fallback_monitor.c`, not by reasoning about it inline at each
+  call site.
 - **RTDE base output rate for this exact CB3 build is unconfirmed** (§2b): monitor
   decimates from whatever full rate the controller streams rather than requesting an
   assumed divisor, so this does not block correctness, only removes a possible
