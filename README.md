@@ -46,10 +46,17 @@ A second, additive export option is planned (tracked in
 force/pose data logger attached (background thread on the robot, CSV written to the USB
 key once the run completes). It does not replace or modify `etalement.script` /
 `etalement.urp`; both pairs will keep being generated side by side, and the simulator
-keeps using the plain `etalement.script`. A second, independent fallback is also
-planned: a stdlib-only CLI on a lab computer wired to the same isolated VLAN, passively
-reading the robot's RTDE stream and writing its own CSV with automatic per-run file
-boundaries. Neither path depends on the other.
+keeps using the plain `etalement.script`.
+
+A second, fully independent fallback tool is planned in its own plan and issue
+(tracked in [issue #7](https://github.com/LARi-UQAC/UR5-Script-Design/issues/7), full
+design in
+[docs/superpower/plans/plan_rtde_fallback_monitor.md](docs/superpower/plans/plan_rtde_fallback_monitor.md)):
+a standalone C executable, statically compiled, run from `cmd.exe` on a lab computer
+wired to the same isolated VLAN. It passively reads the robot's RTDE stream and writes
+its own CSV with automatic per-run file boundaries (no Python, no PowerShell, no
+install of any kind on that machine). Neither the main path nor this fallback depends
+on the other.
 
 ## Dependencies
 
