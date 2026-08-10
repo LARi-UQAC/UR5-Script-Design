@@ -41,19 +41,29 @@ TCP pose X/Y/Z only — no rotation components, no torque components), target 50
    - Subnet mask was not specified; both addresses are consistent with a `/24`
      (`192.168.4.0/24`). Confirm the real mask against the switch's VLAN 4 config at
      deployment time (§6 step 5) — this does not block writing or building the tool.
-2. **Lab computer OS and available tooling** (confirmed 2026-08-06): **Windows**,
-   `cmd.exe` confirmed present, **no Python installed**, PowerShell version/
-   availability **uncertain**. No internet access on this VLAN, so nothing can be
-   installed on this machine at all — whatever runs there must already work with
-   zero additional dependency.
-3. **Language decision: C, compiled to one static executable.** Not PowerShell:
-   version/availability on the target machine is uncertain, and this removes that
-   question entirely (only dependency left is `cmd.exe` + the core Windows
-   `ws2_32.dll`, both universal on any Windows version). Not Rust: would need
-   `rustup`/`cargo` installed on the *build* machine first; a plain MinGW-w64 `gcc` is
-   already available with no setup. Not Python (no interpreter on the target and no
-   way to get one there). The tool is built once, on a normal networked machine that
-   has `gcc`, and only the resulting single `.exe` is copied to the lab computer —
+2. **Lab computer OS and hardware** (confirmed 2026-08-06): **Windows 10 Pro,
+   64-bit**, Intel Core i7-6700 @ 3.4 GHz, 16 GB RAM, `cmd.exe` confirmed present, **no
+   Python installed**. This confirms PowerShell 5.1 is in fact present (built into
+   every Windows 10 install) — the earlier "uncertain" note is resolved to "present,"
+   though it does not change the language decision below, made independent of that
+   fact. No internet access on this VLAN, so nothing can be installed on this machine
+   at all — whatever runs there must already work with zero additional dependency.
+   Hardware is far more than this tool needs (a few hundred bytes/sample at 50 Hz over
+   one TCP socket): no performance risk, no memory-budget concern, unlike the
+   on-robot path's PolyScope program-memory limits.
+3. **Language decision: C, compiled to one static executable, 64-bit build.** Not
+   PowerShell: even now that 5.1 is confirmed present, a static executable still has
+   strictly fewer moving parts (no execution-policy/Mark-of-the-Web handling, no
+   script-vs-interpreter version surface) for the same zero-install property, and the
+   decision was already made and implemented against this reasoning — not revisited
+   for a fact that resolves in the same direction it already assumed. Not Rust: would
+   need `rustup`/`cargo` installed on the *build* machine first; a plain MinGW-w64
+   `gcc` is already available with no setup. Not Python (no interpreter on the target
+   and no way to get one there). Build target: `x86_64-w64-mingw32` (matches the
+   confirmed 64-bit Windows 10 Pro target; this is MinGW-w64 `gcc`'s default on the
+   dev machine already, no cross-compile flag needed). The tool is built once, on a
+   normal networked machine that has `gcc`, and only the resulting single `.exe` is
+   copied to the lab computer —
    nothing else ships, no DLLs (static link), no install step on that machine.
 4. **Can the robot's own data tell this tool when a trial starts and stops, so it can
    open/close CSV files automatically without any manual action?** Yes. RTDE exposes
@@ -229,10 +239,12 @@ On the lab network:
 
 ## 7. Risks and mitigations
 
-- **Lab computer has no Python, PowerShell version uncertain** (confirmed) — resolved
-  by writing this tool in C, statically compiled to a single `.exe` (§0.3). Only
-  runtime requirement is `cmd.exe` (confirmed present) and the core Windows
-  `ws2_32.dll`, both universal on any Windows version.
+- **Lab computer has no Python** (confirmed; Windows 10 Pro 64-bit, i7-6700, 16 GB RAM
+  — hardware is not a constraint here) — resolved by writing this tool in C,
+  statically compiled to a single 64-bit `.exe` (§0.3). Only runtime requirement is
+  `cmd.exe` (confirmed present) and the core Windows `ws2_32.dll`, both bundled with
+  this OS. PowerShell 5.1 is now also confirmed present on this machine, but the
+  language decision does not change on that basis (§0.3).
 - **Subnet mask for `192.168.4.14`**: not given; deferred to the on-site deployment
   step (§6 step 5) rather than blocking this plan — `/24` is the working assumption
   until confirmed against the switch.
