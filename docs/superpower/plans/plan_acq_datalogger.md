@@ -279,9 +279,20 @@ Protocol on port 50100, line oriented, ASCII:
 |---|---|---|
 | a sample line | append to the RAM list | none |
 | an unparsable line | increment `n_bad`, keep going | none |
-| `STOP <n>` | write the CSV, fsync, close | `OK <filename> <rows>\n` |
+| a sample line whose first field is **negative** | read the second field as the robot's own sample count, do not append | none |
+| `STOP <n>`, or a bare `STOP` | write the CSV, fsync, close | `OK <filename> <rows>\n` |
 | `STOP <n>` on a write failure | keep the RAM buffer intact | `ERR <reason>\n` |
 | `RETRY` | rewrite from the retained buffer | `OK ...` or `ERR ...` |
+
+**Amendment, 2026-08-15 (C1).** The plan originally had the robot send `STOP <log_index>`.
+That string cannot be built on CB3: PolyScope 3.x has neither `to_str` nor `str_cat`, so
+`"STOP " + acq_index` has no valid form (this is issue 7 of §1, whose consequence for the
+handshake was missed when §4.5 was written). The emitted script therefore sends the count as
+a **sentinel list with a negative first field**, `[-1.0, acq_index, 0.0, 0.0]`, immediately
+followed by the literal `"STOP"`, which is a constant and legal. The daemon accepts both
+that pair and the plain textual `STOP <n>`, which is what the emulator and the tests use.
+A count that disagrees with the number of rows received is reported, not corrected: it is
+the only evidence available that lines were dropped.
 
 At `MAX_SAMPLES` the server stops appending, **keeps draining** the socket so the robot
 never blocks on a full TCP buffer, and sets `truncated` in the metadata. All stdout lines
