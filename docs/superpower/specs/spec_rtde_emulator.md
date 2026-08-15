@@ -253,7 +253,7 @@ The emulator must never take the visualizer down.
 | Port already in use | Warn, continue without RTDE. The visualizer still runs. |
 | No client attached | Accept loop idles; no packet is built. |
 | Client disconnects mid-run | Server returns to accepting; the simulation keeps playing. The monitor reconnects on its own 2 s retry. |
-| Client slow, `send` would block | Non-blocking send, drop the packet, count it, print the count at stop. A controller drops rather than stalls, and the emitter thread must never stall the render loop. |
+| Client too slow to drain | Blocking send with a deadline, **not** a non-blocking send: a non-blocking `sendall` can deliver a partial packet and desync the stream framing permanently, which is worse than the stall it avoids. The stall is confined to the emitter thread and can never reach the render loop, so it costs nothing. A client that misses the deadline is dropped and counted; the monitor reconnects on its own. |
 | Viewer closed | Daemon thread plus an explicit `stop()` in a `finally`. |
 
 One client at a time. Real RTDE accepts several; this is a deliberate simplification, and
