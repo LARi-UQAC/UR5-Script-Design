@@ -10,6 +10,25 @@
 
 **Spec:** [`../specs/spec_rtde_emulator.md`](../specs/spec_rtde_emulator.md)
 
+## Model routing
+
+Each task carries a **Model:** line. Use it — it is the difference between a
+cheap run and an expensive one, and seven of the ten tasks do not need the
+expensive model.
+
+| Model | When | Tasks |
+|---|---|---|
+| **Sonnet** | The task's code and tests are given in full below. The work is transcription plus running the verification. No judgment about existing code is required. | 1, 2, 3, 4, 8, 9, 10 |
+| **Opus** | The task edits existing files whose structure must be read and understood first, or carries a correctness trap that a plausible-looking implementation would fall into. | 5, 6, 7 |
+
+Two rules that keep the routing honest:
+
+- **A Sonnet task that turns out to need judgment is a plan defect, not a
+  model failure.** Stop, say which step was underspecified, and escalate that
+  task rather than guessing.
+- **Never downgrade tasks 5, 6 or 7.** Their reasons are stated in their own
+  Model lines and are specific, not generic caution.
+
 ## Global Constraints
 
 - `ur5_sim/rtde_server.py` and `ur5_sim/force_model.py` import **stdlib only**. No matplotlib, no Swift, no spatialmath, no numpy.
@@ -31,6 +50,8 @@
 ---
 
 ### Task 1: RTDE wire encoder
+
+**Model: Sonnet.** New file, code and tests given in full, nothing existing to read.
 
 Pins the byte layout shared with the C monitor. This is the load-bearing task: if these constants drift from the C side, a lab CSV fills with plausible wrong numbers.
 
@@ -266,6 +287,8 @@ git commit -m "Add RTDE wire encoder with the byte layout pinned against the C m
 
 ### Task 2: runtime_state machine
 
+**Model: Sonnet.** Appends a self-contained class; code and tests given in full.
+
 **Files:**
 - Modify: `ur5_sim/rtde_server.py` (append)
 - Modify: `ur5_sim/config.py` (add `RTDE_EMU_TRANSITION_PACKETS`)
@@ -463,6 +486,8 @@ git commit -m "Add the runtime_state machine with real CB3 transition states"
 
 ### Task 3: Pose interpolation to the controller rate
 
+**Model: Sonnet.** Pure function, code and tests given in full.
+
 `DT = 0.05` means the trajectory is sampled at 20 Hz, below the 50 Hz the monitor targets. Decimation cannot create samples that were never sent, so the emulator interpolates, as a real CB3 does between waypoints.
 
 **Files:**
@@ -601,6 +626,8 @@ git commit -m "Interpolate the 20 Hz trajectory up to the 125 Hz controller rate
 ---
 
 ### Task 4: FT-300 force surrogate
+
+**Model: Sonnet.** New standalone module, code and tests given in full. The physics judgment is already spent — the parameters and their justification are fixed in the spec.
 
 **Files:**
 - Create: `ur5_sim/force_model.py`
@@ -889,6 +916,8 @@ git commit -m "Add the FT-300 force surrogate driven by simulator penetration de
 ---
 
 ### Task 5: TCP server, handshake and emitter thread
+
+**Model: Opus.** The largest task and the one with real traps: a background thread sharing state under a lock, blocking-versus-non-blocking send (a partial send desyncs the framing permanently), `SO_REUSEADDR` having the opposite meaning on Windows to the one most developers expect, and a handshake that must satisfy a client written in another language. Do not downgrade.
 
 **Files:**
 - Modify: `ur5_sim/rtde_server.py` (append)
@@ -1399,6 +1428,8 @@ git commit -m "Add the RTDE TCP server, handshake and 125 Hz emitter thread"
 
 ### Task 6: PAUSE control in the viewer
 
+**Model: Opus.** Steps 1-4 are mechanical, but step 5 edits `viewer.py`, a ~900-line matplotlib file with existing widget wiring, button state and HUD text that must be read before a third control can be added coherently. The plan describes that edit; it does not hand over the whole file.
+
 Without it the monitor's "a pause does not split the file" cannot be exercised locally. `paused_sim_t` already participates in the clock at `viewer.py:699` and is never set to anything but zero.
 
 **Files:**
@@ -1622,6 +1653,8 @@ git commit -m "Add a real PAUSE to the viewer, using the clock offset that was a
 ---
 
 ### Task 7: Wire the emulator into the CLI and the viewer
+
+**Model: Opus.** Touches both `cli.py` and `viewer.py`, and the snippets below name buffers — `poses_xyzrpy_per_frame`, `penetration_per_frame`, `times`, `total_sim_time`, `contact_flags`, `depths` — that are **illustrative, not verified against the real files**. The implementer must read `viewer.py` and `cli.py`, find the actual buffers holding the surface-clamped poses and the per-frame penetration, and use those names. Transcribing the snippets literally will not run. Do not downgrade.
 
 **Files:**
 - Modify: `ur5_sim/cli.py`
@@ -1922,6 +1955,8 @@ git commit -m "Serve RTDE from --visualize and add the headless --emulate runner
 ---
 
 ### Task 8: `--verify-csv`
+
+**Model: Sonnet.** The module and its tests are given in full. Step 5 reuses the polyline the `--verify-csv` branch already has to hand; if that array is not obvious in `cli.py`, stop and flag it rather than guessing.
 
 Comparing CSV row *N* to trajectory time *N* breaks as soon as a pause exists, because controller time advances while simulation time freezes. The primary check is therefore geometric.
 
@@ -2258,6 +2293,8 @@ git commit -m "Add --verify-csv: geometric, pause-immune check of a recorded CSV
 
 ### Task 9: Simulated-source provenance in the monitor
 
+**Model: Sonnet.** Small, localized C change with the full replacement function and its tests given. The existing C suite catches a mistake immediately.
+
 Emulator CSVs otherwise carry the same prefix and the same header as lab recordings. For a research dataset that is a hazard worth designing out.
 
 **Files:**
@@ -2386,6 +2423,8 @@ git commit -m "Mark a loopback endpoint as a simulated source in the CSV header"
 ---
 
 ### Task 10: Launcher wiring and documentation
+
+**Model: Sonnet.** Batch snippets given in full; the documentation edits are additive and their content is listed section by section. Follow the surrounding style of each file rather than inventing one.
 
 **Files:**
 - Modify: `validate.bat`
