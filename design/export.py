@@ -489,6 +489,206 @@ end
     return lines
 
 
+# Ancres d'insertion du bloc d'acquisition. Ce sont des lignes que
+# _build_urscript_lines() emet toujours ; si l'une disparait, l'export acq
+# echoue franchement (ValueError) au lieu de produire un programme ampute.
+_ACQ_ANCHOR_THREAD = 'def etalement():'
+_ACQ_ANCHOR_SET_TCP = '  set_tcp(p['
+_ACQ_ANCHOR_TAIL = 'etalement()'
+
+
+def _acq_thread_lines() -> list[str]:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Bloc URScript du thread d'acquisition 50 Hz, insere avant
+        `def etalement():`. Contraintes CB3 (PolyScope 3.x) respectees ici :
+        aucun movel/stopl dans un thread, aucun slice de liste, aucune
+        allocation dans la boucle, aucune construction de chaine.
+
+        Cadence : le tick de `sync()` vaut 8 ms sur CB3, donc 20 ms n'est pas
+        atteignable. La boucle alterne 2 et 3 ticks (16 et 24 ms) pour une
+        moyenne exacte de 20.000 ms, et chaque echantillon porte son temps de
+        tick reel, ce qui rend l'analyse exacte malgre la gigue de +/-4 ms.
+
+    Outputs:
+        lines (list[str]): lignes URScript du bloc thread.
+    --------------------------------------------------------------------------
+    """
+    return [
+        '# === ACQUISITION 50 Hz ===',
+        '# Ajout au programme d\'etalement : aucun waypoint, aucune vitesse et',
+        '# aucun parametre de force n\'est modifie par ce bloc. Le thread lit la',
+        '# pose et l\'envoie au daemon (cle USB) sur la boucle locale ; le fichier',
+        '# CSV est ecrit par le daemon a la fin, jamais pendant le mouvement.',
+        f'global ACQ_LOG_PORT = {params.ACQ_LOG_PORT}',
+        f'global ACQ_MAX_SAMPLES = {params.ACQ_MAX_SAMPLES}',
+        '# Bascule de repli : True fait porter par le script les efforts internes',
+        '# get_tcp_force() (estimation par courants moteur, erreur de plusieurs N)',
+        '# au lieu de laisser le daemon fusionner le flux FT-300 calibre.',
+        'global ACQ_USE_INTERNAL_FORCE = False',
+        'global acq_keep_logging = True',
+        'global acq_index = 0',
+        'global acq_ticks = 0',
+        '# Liste reutilisee a chaque echantillon : affectation indexee seulement,',
+        '# aucune allocation dans la boucle (list_append n\'existe pas sur CB3).',
+        'global acq_sample = [0.0, 0.0, 0.0, 0.0]',
+        '',
+        'thread data_logger():',
+        '  # acq_long alterne 2 et 3 ticks de 8 ms : 16, 24, 16, 24 ms.',
+        '  acq_long = False',
+        '  while acq_keep_logging and acq_index < ACQ_MAX_SAMPLES:',
+        '    sync()',
+        '    sync()',
+        '    acq_ticks = acq_ticks + 2',
+        '    if acq_long:',
+        '      sync()',
+        '      acq_ticks = acq_ticks + 1',
+        '    end',
+        '    acq_long = not acq_long',
+        '    acq_pose = get_actual_tcp_pose()',
+        '    acq_sample[0] = acq_ticks * 0.008',
+        '    acq_sample[1] = acq_pose[0]',
+        '    acq_sample[2] = acq_pose[1]',
+        '    acq_sample[3] = acq_pose[2]',
+        '    # socket_send_line serialise la liste ([t,x,y,z]) : aucune chaine',
+        '    # n\'est construite ici, to_str / str_cat n\'existent pas sur CB3.',
+        '    socket_send_line(acq_sample, "acq")',
+        '    acq_index = acq_index + 1',
+        '  end',
+        '  # Sortie de boucle sur l\'un ou l\'autre test : l\'arret au plafond du',
+        '  # tampon est automatique, sans debordement possible.',
+        'end',
+        '',
+    ]
+
+
+def _acq_open_lines() -> list[str]:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Ouverture du socket et demarrage du thread, insere juste apres
+        set_tcp(). Place avant tout mouvement, sondage Z compris : un daemon
+        absent arrete le programme par popup avant que le robot ne bouge,
+        plutot que de faire un essai complet sans enregistrement.
+
+    Outputs:
+        lines (list[str]): lignes URScript a inserer dans etalement().
+    --------------------------------------------------------------------------
+    """
+    return [
+        '  # --- Acquisition : ouverture avant tout mouvement ---',
+        '  acq_ouvert = socket_open("127.0.0.1", ACQ_LOG_PORT, "acq")',
+        '  if not acq_ouvert:',
+        '    popup("Daemon d\'acquisition injoignable sur 127.0.0.1", '
+        '"Acquisition", error=True)',
+        '    halt',
+        '  end',
+        '  acq_logger = run data_logger()',
+    ]
+
+
+def _acq_stop_lines() -> list[str]:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Arret du thread et poignee de main d'export, insere apres le retrait
+        final et avant la fin de etalement(). L'ordre compte : le drapeau
+        arrete la boucle, le sleep laisse passer un dernier cycle de 24 ms, le
+        kill garantit qu'aucun echantillon n'est ecrit apres, et seulement
+        ensuite le daemon recoit l'ordre d'ecrire le fichier.
+
+        Le compte d'echantillons voyage dans une liste sentinelle de premier
+        champ negatif, pas dans une chaine "STOP <n>" : CB3 3.x n'a ni to_str
+        ni str_cat, donc "STOP " + acq_index est impossible a construire. Le
+        litteral "STOP" qui suit, lui, est une constante, donc legal.
+
+    Outputs:
+        lines (list[str]): lignes URScript a inserer dans etalement().
+    --------------------------------------------------------------------------
+    """
+    return [
+        '',
+        '  # --- Acquisition : arret du thread puis export ---',
+        '  acq_keep_logging = False',
+        '  sleep(0.1)',
+        '  kill acq_logger',
+        '  # Sentinelle de comptage : premier champ negatif, compte en second.',
+        '  acq_sample[0] = -1.0',
+        '  acq_sample[1] = acq_index',
+        '  acq_sample[2] = 0.0',
+        '  acq_sample[3] = 0.0',
+        '  socket_send_line(acq_sample, "acq")',
+        '  socket_send_line("STOP", "acq")',
+        '  acq_reponse = socket_read_string("acq")',
+        '  textmsg("Acquisition : ", acq_reponse)',
+        '  popup(acq_reponse, "Acquisition terminee")',
+        '  socket_close("acq")',
+    ]
+
+
+def _build_acq_lines(base_lines: list[str]) -> list[str]:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Enveloppe la sortie intacte de _build_urscript_lines() du processus
+        d'acquisition. Le mouvement n'est pas touche : aucune ligne existante
+        n'est modifiee ni supprimee, seules des lignes sont inserees a trois
+        ancres. C'est ce qui permet a tests/test_acq_export.py de prouver que
+        parse_poses() rend exactement les memes 4-uplets pour les deux
+        fichiers.
+
+        Une ancre absente est une erreur d'export (ValueError), jamais un saut
+        silencieux : un programme ampute de son thread partirait sur le robot
+        en donnant l'illusion d'enregistrer.
+
+    Inputs:
+        base_lines (list[str]): lignes de etalement.script, non modifiees.
+
+    Outputs:
+        lines (list[str]): lignes de etalement_acq.script.
+    --------------------------------------------------------------------------
+    """
+    lines = list(base_lines)
+
+    try:
+        i_thread = lines.index(_ACQ_ANCHOR_THREAD)
+    except ValueError:
+        raise ValueError(
+            f"Export acq impossible : ancre '{_ACQ_ANCHOR_THREAD}' absente du "
+            f"script de base. _build_urscript_lines() a change de forme ; "
+            f"corriger _build_acq_lines() avant d'exporter.")
+
+    i_set_tcp = next(
+        (i for i, ln in enumerate(lines)
+         if ln.startswith(_ACQ_ANCHOR_SET_TCP) and i > i_thread), None)
+    if i_set_tcp is None:
+        raise ValueError(
+            "Export acq impossible : ancre set_tcp absente de etalement(). "
+            "Le socket doit s'ouvrir avant le premier mouvement.")
+
+    i_tail = next(
+        (i for i in range(len(lines) - 1, -1, -1)
+         if lines[i] == _ACQ_ANCHOR_TAIL), None)
+    if i_tail is None:
+        raise ValueError(
+            "Export acq impossible : appel final 'etalement()' absent.")
+    i_end = next(
+        (i for i in range(i_tail - 1, i_set_tcp, -1) if lines[i] == 'end'),
+        None)
+    if i_end is None:
+        raise ValueError(
+            "Export acq impossible : fin de etalement() introuvable avant "
+            "l'appel final.")
+
+    # Insertions de la fin vers le debut : les index calcules ci-dessus
+    # restent valides tant qu'on n'a pas insere avant eux.
+    lines[i_end:i_end] = _acq_stop_lines()
+    lines[i_set_tcp + 1:i_set_tcp + 1] = _acq_open_lines()
+    lines[i_thread:i_thread] = _acq_thread_lines()
+    return lines
+
+
 # État du dernier export, pour détecter un fichier retouché à la main. Le
 # `.urp` de référence a été ajusté manuellement pour des essais robot, et
 # `generate_urp` l'écrasait jusqu'ici sans le moindre avertissement.
