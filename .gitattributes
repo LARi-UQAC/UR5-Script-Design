@@ -1,0 +1,4 @@
+# Le fichier magique UR est lu par le controleur Linux du robot : un CRLF
+# sur la ligne shebang casse l interpreteur. Il reste en LF sur tout poste,
+# quelle que soit la configuration core.autocrlf de la machine.
+*.sh text eol=lf
