@@ -9,3 +9,12 @@ datalogger/*.exe
 datalogger/tests/*.exe
 datalogger/tests/_tmp_*/
 ACQ_rtde_*.csv
+
+# etalement_settings.json: reglages locaux de l'operateur, propres a un poste
+# et a un essai ; design/params.py porte les defauts de reference versionnes
+etalement_settings.json
+
+# .etalement_export_state.json: empreinte du dernier .script / .urp genere,
+# pour detecter qu'un fichier de sortie a ete retouche a la main avant de
+# l'ecraser. Etat local d'un poste, sans interet pour un autre.
+.etalement_export_state.json

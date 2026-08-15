@@ -21,7 +21,11 @@ Two cooperating Python tools plus the generated on-robot artifacts:
 
 - **`design/`** - interactive design UI (matplotlib) to tune the 6 spreading cycles
   (3 boustrophedon + epicycloid, 3 linear) on a 50x50 mm plate, then export the
-  trajectory as `etalement.script` (URScript) and/or `etalement.urp` (PolyScope XML).
+  trajectory as `etalement.script` (URScript) and/or `etalement.urp` (PolyScope XML). A
+  Paramètres button opens a settings window covering the protocol's tunable variables;
+  operator overrides are kept in `etalement_settings.json` (gitignored, specific to one
+  workstation and one trial), with a versioned example at
+  `etalement_settings.example.json`.
 - **`ur5_sim/`** - offline validator and replay. Parses `etalement.script`, runs
   sequential IK against a UR5 model, reports failures, and (with `--visualize`) renders
   the robot in Swift (WebGL) alongside matplotlib panels (XYZ vs time, XY trail, IK
@@ -110,7 +114,50 @@ python ur5_etalementv6.py
 python ur5_etalementv6.py --export        # write etalement.script
 python ur5_etalementv6.py --export-urp    # write etalement.urp
 python ur5_etalementv6.py --no-show       # headless
+python ur5_etalementv6.py --export --force  # overwrite a hand-edited output file
 ```
+
+The design window's Paramètres button opens the settings editor described below. The
+Sortie field next to Exporter URScript names the output file (default `etalement`), so a
+trial variant can be produced without touching the reference `etalement.script`. Settings
+persist to `etalement_settings.json` at the repo root (gitignored, specific to one
+workstation and one trial); a versioned example lives at
+`etalement_settings.example.json`. Both `--export` and `--export-urp` (and the equivalent
+Enregistrer/Exporter buttons in the settings window) refuse to overwrite an output file
+whose content has drifted from the last recorded export - a `.urp` retouched by hand on
+the pendant, for instance - unless `--force` is passed.
+
+## Settings
+
+The Paramètres button opens a window with five tabs, generated from a single metadata
+table so a new field never needs its own hand-written row: Force (target Z force and the
+`force_mode` deviation limits), Sondage (Z-probe timing, plus the parked 3-point probe
+fields), Mouvement (URScript accelerations, phase speeds, blend radius, circular waypoint
+density), Surface (plate size, transit and retreat heights, cycle durations and counts),
+and Calibration (robot origin, base rotation, `P_REF`, and the four TCP tool-length
+offsets). Each row shows the field next to its hard-coded default and valid range, so a
+saved override stays legible against the protocol reference in `design/params.py`.
+
+Two fields stay read-only on every tab: `urscript_max_tcp_speed` and `urscript_max_bytes`
+are PolyScope controller limits, not preferences, and letting the operator edit them would
+misrepresent what the real controller enforces. The Calibration tab is locked behind an
+explicit "Deverrouiller la calibration" checkbox with a confirmation dialog, because its
+fields move the robot's anchor in the world rather than tune the spreading protocol; a
+session always reopens locked, since nothing there is meant to persist by accident.
+`tcp_z` is
+computed from the four tool-length fields above it (FT-300, coupling, 2F-85 gripper,
+silicone finger) and cannot be edited on its own.
+
+The Sondage tab's dropdown still lists a `plane3` probing mode, but `validate()` refuses
+that value when Appliquer is clicked, and the four fields `plane3` alone would need
+(approach height, tilt limit, retry count, probe points) stay grayed out regardless of the
+selected mode: the 3-point probe is parked, incorrect as implemented (fixed in Z, no
+tilt), and its rework is separate future work (see [ARCHITECTURE.md](ARCHITECTURE.md),
+section 6).
+
+Réinitialiser resets either the current tab or the whole window to the `design/params.py`
+defaults. Deleting `etalement_settings.json` has the same effect for the whole file: the
+settings layer falls back to those defaults whenever the file is absent or unreadable.
 
 ## Tests
 

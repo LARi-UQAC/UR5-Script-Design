@@ -1,0 +1,9 @@
+{
+  "_comment": "Exemple de reglages locaux pour etalement_settings.json (fichier ignore par git, propre a un poste et a un essai). Surcharges illustratives : force_z_target = 8.0 N (essai a une force plus elevee que la cible protocole 6.0 N) ; probe_force_thr = 3.0 N (seuil de detection de contact abaisse pour un sondage plus sensible) ; probe_descent_v = 0.003 m/s (descente de sondage ralentie pour ce poste). Tout champ absent de overrides garde le defaut code en dur dans design/params.py. Copier ce fichier vers etalement_settings.json et l ajuster au poste et a l essai en cours.",
+  "fingerprint": "10318c1",
+  "overrides": {
+    "force_z_target": 8.0,
+    "probe_descent_v": 0.003,
+    "probe_force_thr": 3.0
+  }
+}

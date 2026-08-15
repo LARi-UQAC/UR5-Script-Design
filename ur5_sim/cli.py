@@ -33,6 +33,7 @@ from ur5_sim.config import (
     SURFACE_FORCE_TARGET_DEPTH_M,
     SURFACE_FORCE_TARGET_TOL_M,
     URSCRIPT_MAX_TCP_SPEED_MPS,
+    settings_summary,
 )
 from ur5_sim.kinematics.ik import run_ik
 from ur5_sim.kinematics.ik_multisolve import (
@@ -231,6 +232,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    # D'ou viennent les valeurs qui vont servir a valider, et quand elles ont
+    # ete lues : sans cette ligne, un rapport vert ne dit pas contre quels
+    # reglages il est vert (plan_variables_UI.md, sections 3.3 et 8).
+    print(settings_summary())
+    print()
 
     p_anchor_old = urscript_pose(*P_ANCHOR_OLD_RAW)
     if args.identity:

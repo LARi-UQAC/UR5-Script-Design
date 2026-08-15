@@ -123,6 +123,21 @@ PROBE_POINTS_PLATE_MM: list[tuple[float, float]] = [
 ]
 PROBE_FLOOR_PLATE_MM: float = -10.0  # mm
 PROBE_MAX_TRAVEL: float = 0.15   # m — course max de descente du sondage Z (securite anti-collision)
+# Mode de sondage expose dans l'interface de reglage. Seul 'z1' est utilisable :
+# 'plane3' (sondage 3 points) est parque, fige en Z, et reste grise dans l'IHM.
+PROBE_MODE: str = 'z1'
+
+# =============================================================================
+# DENSITE DES WAYPOINTS ET INTERFACE
+# =============================================================================
+# 'subsample' sous-echantillonne chaque cycle circulaire a
+# URSCRIPT_N_WAYPOINTS_CIRCULAR points, ce que fait l'export headless ; 'all'
+# emet tous les points du trace, ce que faisait l'export depuis l'interface.
+# Deux chemins d'export produisaient jusqu'ici des densites differentes.
+CIRCULAR_WAYPOINT_MODE: str = 'subsample'
+# Points de discretisation du curseur de l'interface de trace, cycles 1 a 3.
+# 0 = automatique, c'est-a-dire la densite naturelle du trace genere.
+UI_DISCRETIZATION_POINTS: int = 0
 
 # =============================================================================
 # SÉCURITÉ APPROCHE INITIALE

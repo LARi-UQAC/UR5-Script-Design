@@ -24,13 +24,8 @@ from typing import Any
 import numpy as np
 
 from design.geometry import _pose_inv, _pose_trans
-from design.params import (
-    ROBOT_BASE_ROTATION_DEG,
-    ROBOT_RX, ROBOT_RY, ROBOT_RZ,
-    ROBOT_X_ORIGIN, ROBOT_Y_ORIGIN, ROBOT_Z_SURFACE,
-    P_REF,
-    SCRIPT_PATH,
-)
+from design.params import SCRIPT_PATH
+from design.settings import get_settings
 from ur5_sim.ipc_config import TCP_LIVE_HOST, TCP_LIVE_MAX_BYTES, TCP_LIVE_PORT
 
 
@@ -42,17 +37,23 @@ def _world_to_plate_mm(wx_m: float, wy_m: float) -> tuple[float, float]:
     """
     Inverse de plate_to_robot() + _abs_pose().
     Récupère les coordonnées plate-frame (mm) depuis une pose monde (m).
+
+    Les constantes de calibration sont lues à l'appel : cette inversion doit
+    suivre exactement la même chaîne de repères que l'aller, sinon l'overlay
+    live atterrit à côté du tracé dès que l'ancrage robot est réglé.
     """
+    s = get_settings()
     p_anchor_old = [
-        ROBOT_X_ORIGIN, ROBOT_Y_ORIGIN, ROBOT_Z_SURFACE,
-        ROBOT_RX, ROBOT_RY, ROBOT_RZ,
+        s.robot_x_origin, s.robot_y_origin, s.robot_z_surface,
+        s.robot_rx, s.robot_ry, s.robot_rz,
     ]
-    world_pose = [wx_m, wy_m, ROBOT_Z_SURFACE, ROBOT_RX, ROBOT_RY, ROBOT_RZ]
-    p_orig = _pose_trans(p_anchor_old, _pose_trans(_pose_inv(P_REF), world_pose))
+    world_pose = [wx_m, wy_m, s.robot_z_surface,
+                  s.robot_rx, s.robot_ry, s.robot_rz]
+    p_orig = _pose_trans(p_anchor_old, _pose_trans(_pose_inv(list(s.p_ref)), world_pose))
     rx_m, ry_m = p_orig[0], p_orig[1]
-    a = np.radians(ROBOT_BASE_ROTATION_DEG)
-    dx = rx_m - ROBOT_X_ORIGIN
-    dy = ry_m - ROBOT_Y_ORIGIN
+    a = np.radians(s.robot_base_rotation_deg)
+    dx = rx_m - s.robot_x_origin
+    dy = ry_m - s.robot_y_origin
     plate_x_m = dx * np.cos(a) + dy * np.sin(a)
     plate_y_m = -dx * np.sin(a) + dy * np.cos(a)
     return plate_x_m * 1000.0, plate_y_m * 1000.0

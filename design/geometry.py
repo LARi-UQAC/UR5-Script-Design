@@ -15,12 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from design.params import (
-    P_REF,
-    ROBOT_BASE_ROTATION_DEG,
-    ROBOT_RX, ROBOT_RY, ROBOT_RZ,
-    ROBOT_X_ORIGIN, ROBOT_Y_ORIGIN, ROBOT_Z_SURFACE,
-)
+from design.settings import get_settings
 
 
 def mm_to_m(v: float) -> float:
@@ -32,12 +27,17 @@ def plate_to_robot(x_mm: float, y_mm: float) -> tuple[float, float]:
     Convertit des coordonnées plaque (mm) en coordonnées repère robot (m).
     Applique ROBOT_BASE_ROTATION_DEG autour de l'origine plaque, puis ajoute
     ROBOT_X/Y_ORIGIN.
+
+    Les constantes de calibration sont lues au moment de l'appel via
+    get_settings() : un `from design.params import X` les figerait à l'import
+    et rendrait l'onglet Calibration sans effet (plan, section 2).
     """
-    angle = np.radians(ROBOT_BASE_ROTATION_DEG)
+    s = get_settings()
+    angle = np.radians(s.robot_base_rotation_deg)
     dx = mm_to_m(x_mm)
     dy = mm_to_m(y_mm)
-    rx = ROBOT_X_ORIGIN + dx * np.cos(angle) - dy * np.sin(angle)
-    ry = ROBOT_Y_ORIGIN + dx * np.sin(angle) + dy * np.cos(angle)
+    rx = s.robot_x_origin + dx * np.cos(angle) - dy * np.sin(angle)
+    ry = s.robot_y_origin + dx * np.sin(angle) + dy * np.cos(angle)
     return round(rx, 6), round(ry, 6)
 
 
@@ -106,11 +106,13 @@ def _abs_pose(p_orig: list[float] | np.ndarray) -> list[float]:
         pose_trans(P_REF, pose_trans(pose_inv(P_ANCHOR_OLD), p_orig))
     P_ANCHOR_OLD est l'ancre nominale = pose des constantes ROBOT_* d'origine plaque.
     """
+    s = get_settings()
     p_anchor_old = [
-        ROBOT_X_ORIGIN, ROBOT_Y_ORIGIN, ROBOT_Z_SURFACE,
-        ROBOT_RX, ROBOT_RY, ROBOT_RZ,
+        s.robot_x_origin, s.robot_y_origin, s.robot_z_surface,
+        s.robot_rx, s.robot_ry, s.robot_rz,
     ]
-    return _pose_trans(P_REF, _pose_trans(_pose_inv(p_anchor_old), list(p_orig)))
+    return _pose_trans(list(s.p_ref),
+                       _pose_trans(_pose_inv(p_anchor_old), list(p_orig)))
 
 
 def _fmt_raw_pose(p6: list[float]) -> str:

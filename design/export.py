@@ -19,10 +19,11 @@ Fonctions exportées :
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
-import numpy as np
-
+import design.params as params
 from design.geometry import (
     _abs_pose,
     _fmt_pose,
@@ -30,51 +31,23 @@ from design.geometry import (
     mm_to_m,
     plate_to_robot,
 )
-from design.params import (
-    FORCE_CONTACT_DEPTH,
-    FORCE_LIMIT_ROT,
-    FORCE_LIMIT_XY,
-    FORCE_LIMIT_Z,
-    FORCE_Z_TARGET,
-    PROBE_ACCEL,
-    PROBE_APPROACH_MM,
-    PROBE_DESCENT_V,
-    PROBE_FLOOR_PLATE_MM,
-    PROBE_FORCE_THR,
-    PROBE_MAX_TRAVEL,
-    PROBE_POINTS_PLATE_MM,
-    PROBE_RETRY_MAX,
-    PROBE_TILT_MAX_RAD,
-    P_REF,
-    ROBOT_RX, ROBOT_RY, ROBOT_RZ,
-    ROBOT_X_ORIGIN, ROBOT_Y_ORIGIN, ROBOT_Z_SURFACE,
-    SCRIPT_PATH,
-    TCP_X, TCP_Y, TCP_Z,
-    URP_PATH,
-    URSCRIPT_ACCEL,
-    URSCRIPT_BLEND,
-    URSCRIPT_CONTACT_V,
-    URSCRIPT_MAX_BYTES,
-    URSCRIPT_MAX_TCP_SPEED,
-    URSCRIPT_N_WAYPOINTS_CIRCULAR,
-    URSCRIPT_RECONTACT_V,
-    URSCRIPT_TRANSIT_V,
-    Z_TRANSIT,
-    Z_RETREAT_END,
-    CIRC_SPEED, LIN_SPEED,
-)
+from design.params import SCRIPT_PATH, URP_PATH
+from design.settings import Settings, get_settings
+from design.settings_spec import SPECS
 from design.trajectory import get_waypoint_indices
 
 
-def _clamp_tcp_speed(name: str, v_mps: float) -> float:
+def _clamp_tcp_speed(name: str, v_mps: float, cap: float | None = None) -> float:
     """
     Plafonne une vitesse TCP à URSCRIPT_MAX_TCP_SPEED (limite PolyScope).
     Imprime un avertissement quand le clamp s'active.
     """
-    if v_mps > URSCRIPT_MAX_TCP_SPEED:
+    if cap is None:
+        cap = get_settings().urscript_max_tcp_speed
+    if v_mps > cap:
         print(f"WARN: {name} = {v_mps:.3f} m/s > limite PolyScope "
-              f"{URSCRIPT_MAX_TCP_SPEED:.3f} m/s, clamp.")
-        return URSCRIPT_MAX_TCP_SPEED
+              f"{cap:.3f} m/s, clamp.")
+        return cap
     return v_mps
 
 
@@ -83,20 +56,66 @@ def _validate_script_memory(filename: Path, label: str) -> bool:
     Vérifie que le fichier généré reste dans le budget mémoire PolyScope.
     Retourne False si dépassé, True sinon.
     """
+    max_bytes = get_settings().urscript_max_bytes
     size_bytes = filename.stat().st_size
-    pct = 100.0 * size_bytes / URSCRIPT_MAX_BYTES
-    print(f"Mémoire {label}: {size_bytes} octets / {URSCRIPT_MAX_BYTES} "
+    pct = 100.0 * size_bytes / max_bytes
+    print(f"Mémoire {label}: {size_bytes} octets / {max_bytes} "
           f"({pct:.1f}% du budget PolyScope)")
-    if size_bytes > URSCRIPT_MAX_BYTES:
+    if size_bytes > max_bytes:
         print(f"ECHEC EXPORT {label}: budget mémoire URSCRIPT_MAX_BYTES = "
-              f"{URSCRIPT_MAX_BYTES} octets dépassé de "
-              f"{size_bytes - URSCRIPT_MAX_BYTES} octets. "
+              f"{max_bytes} octets dépassé de "
+              f"{size_bytes - max_bytes} octets. "
               f"Réduire URSCRIPT_N_WAYPOINTS_CIRCULAR / LIN_N_POINTS_PER_SEGMENT.")
         return False
     return True
 
 
-def _build_urscript_lines(cycles: list[dict]) -> list[str]:
+def _settings_header_lines(settings: Settings) -> list[str]:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Bloc de tracabilite des reglages, insere dans l'en-tete du script et du
+        .urp. Exigence de protocole experimental : savoir avec quelles valeurs
+        un essai a ete produit.
+
+        Retourne une liste VIDE quand rien n'est surcharge, pour qu'une sortie
+        aux defauts reste identique octet pour octet a la reference : la date
+        et l'empreinte varient par construction.
+
+    Inputs:
+        settings (Settings): reglages effectifs de l'export.
+
+    Outputs:
+        lines (list[str]): lignes de commentaire URScript, vide si aucun ecart.
+    --------------------------------------------------------------------------
+    """
+    overrides = settings.to_overrides()
+    if not overrides:
+        return []
+    from datetime import datetime
+
+    source = settings.source
+    lines = [
+        '# === REGLAGES UTILISES ===',
+        f'# genere le {datetime.now().strftime("%Y-%m-%d %H:%M")}, '
+        f'source : {source}',
+        '# valeurs modifiees par rapport aux defauts :',
+    ]
+    by_name = {spec.name: spec for spec in SPECS}
+    for name in sorted(overrides):
+        spec = by_name[name]
+        default = getattr(__import__('design.params', fromlist=['x']),
+                          spec.const)
+        lines.append(
+            f'#   {spec.const:<28} {default} -> {overrides[name]} '
+            f'{spec.unit}'.rstrip())
+    lines.append(f'# empreinte des reglages : {settings.fingerprint()}')
+    lines.append('#')
+    return lines
+
+
+def _build_urscript_lines(cycles: list[dict],
+                          settings: Settings | None = None) -> list[str]:
     """
     Construit la liste des lignes URScript (partagée entre generate_urscript
     et generate_urp). Inclut le sondage de surface 3 points, l'ajustement de
@@ -107,20 +126,25 @@ def _build_urscript_lines(cycles: list[dict]) -> list[str]:
     du module). Ce bloc apparaît donc dans etalement.script ET dans le <script>
     du .urp.
     """
-    z_transit_m = ROBOT_Z_SURFACE + mm_to_m(Z_TRANSIT)
+    # Reglages lus a l'appel, jamais importes par valeur (plan, section 2).
+    s = settings or get_settings()
+    cap = s.urscript_max_tcp_speed
+    z_transit_m = s.robot_z_surface + mm_to_m(s.z_transit)
     speed_var_map = {'circular': 'V_CIRC', 'linear': 'V_RECT'}
 
     # Le plafond URSCRIPT_MAX_TCP_SPEED (0.25 m/s) est applique par PolyScope
     # sur le vrai robot ; on ne l'emet plus dans le .script. La vitesse de
     # transit (post-clamp) est inlinee directement sur chaque movel de
     # transit au lieu d'etre exposee comme global URSCRIPT_TRANSIT_V.
-    transit_v_mps = _clamp_tcp_speed("URSCRIPT_TRANSIT_V", URSCRIPT_TRANSIT_V)
+    transit_v_mps = _clamp_tcp_speed("URSCRIPT_TRANSIT_V",
+                                     s.urscript_transit_v, cap)
 
     probe_pts_robot = [
-        plate_to_robot(x_mm, y_mm) for (x_mm, y_mm) in PROBE_POINTS_PLATE_MM
+        plate_to_robot(x_mm, y_mm) for (x_mm, y_mm) in s.probe_points_plate_mm
     ]
     probe_nominal_contact = [
-        _abs_pose([px_r, py_r, ROBOT_Z_SURFACE, ROBOT_RX, ROBOT_RY, ROBOT_RZ])
+        _abs_pose([px_r, py_r, s.robot_z_surface,
+                   s.robot_rx, s.robot_ry, s.robot_rz])
         for (px_r, py_r) in probe_pts_robot
     ]
     # nominal_frame_pose : ancre du repere nominal (1er point de contact nominal).
@@ -149,13 +173,14 @@ def _build_urscript_lines(cycles: list[dict]) -> list[str]:
     #     probe_blocks.append((pose_app, pose_floor))
     # -------------------------------------------------------------------------
 
-    p_ref_str = 'p[' + ', '.join(f'{v}' for v in P_REF) + ']'
+    p_ref_str = 'p[' + ', '.join(f'{v}' for v in s.p_ref) + ']'
     nominal_frame_str = _fmt_raw_pose(nominal_frame_pose)
     lines = [
         '# UR5 - Protocole etalement cosmetique',
         '# Genere automatiquement par ur5_etalement.py',
         '# IMPORTANT : calibrer ROBOT_X_ORIGIN, ROBOT_Y_ORIGIN, ROBOT_Z_SURFACE avant execution',
         '#',
+        *_settings_header_lines(s),
         '# === PINCE 2F-85 : AUCUN ACTIONNEMENT ===',
         '# Ce programme n a pas de commande de pince. La 2F-85 est un support',
         '# passif pour le doigt silicone ; seule sa longueur (TCP_GRIPPER_Z=145 mm)',
@@ -174,25 +199,25 @@ def _build_urscript_lines(cycles: list[dict]) -> list[str]:
         '# Note : URSCRIPT_MAX_TCP_SPEED (limite PolyScope, 0.25 m/s) n\'est pas',
         '# emis ici ; il est applique par le controleur. La vitesse de transit',
         '# est inlinee directement sur les movel de transit.',
-        f'global URSCRIPT_CONTACT_V = {_clamp_tcp_speed("URSCRIPT_CONTACT_V", URSCRIPT_CONTACT_V):.4f}  #sym:URSCRIPT_CONTACT_V',
-        f'global URSCRIPT_RECONTACT_V = {_clamp_tcp_speed("URSCRIPT_RECONTACT_V", URSCRIPT_RECONTACT_V):.4f}  #sym:URSCRIPT_RECONTACT_V',
-        f'global V_CIRC = {_clamp_tcp_speed("V_CIRC", mm_to_m(CIRC_SPEED)):.4f}  #sym:CIRC_SPEED',
-        f'global V_RECT = {_clamp_tcp_speed("V_RECT", mm_to_m(LIN_SPEED)):.4f}  #sym:LIN_SPEED',
+        f'global URSCRIPT_CONTACT_V = {_clamp_tcp_speed("URSCRIPT_CONTACT_V", s.urscript_contact_v, cap):.4f}  #sym:URSCRIPT_CONTACT_V',
+        f'global URSCRIPT_RECONTACT_V = {_clamp_tcp_speed("URSCRIPT_RECONTACT_V", s.urscript_recontact_v, cap):.4f}  #sym:URSCRIPT_RECONTACT_V',
+        f'global V_CIRC = {_clamp_tcp_speed("V_CIRC", mm_to_m(s.circ_speed), cap):.4f}  #sym:CIRC_SPEED',
+        f'global V_RECT = {_clamp_tcp_speed("V_RECT", mm_to_m(s.lin_speed), cap):.4f}  #sym:LIN_SPEED',
         '',
         '# --- Accelerations (m/s^2) par phase ---',
-        f'global URSCRIPT_ACCEL = {URSCRIPT_ACCEL}  #sym:URSCRIPT_ACCEL',
+        f'global URSCRIPT_ACCEL = {s.urscript_accel}  #sym:URSCRIPT_ACCEL',
         'global A_INIT = 1.2  #sym:A_INIT',
         '',
         '# --- Facteurs multiplicateurs globaux ---',
         'global SPEED_FACTOR = 1.0',
         'global ACCEL_FACTOR = 1.0',
-        f'global URSCRIPT_BLEND = {URSCRIPT_BLEND}  #sym:URSCRIPT_BLEND',
+        f'global URSCRIPT_BLEND = {s.urscript_blend}  #sym:URSCRIPT_BLEND',
         '',
         '# --- Sondage de surface : 1 point en Z (sondage 3 points DESACTIVE, voir bloc commente) ---',
-        f'global PROBE_FORCE_THR    = {PROBE_FORCE_THR}',
-        f'global PROBE_DESCENT_V    = {_clamp_tcp_speed("PROBE_DESCENT_V", PROBE_DESCENT_V):.4f}',
-        f'global PROBE_ACCEL        = {PROBE_ACCEL}',
-        f'global PROBE_MAX_TRAVEL   = {PROBE_MAX_TRAVEL}',
+        f'global PROBE_FORCE_THR    = {s.probe_force_thr}',
+        f'global PROBE_DESCENT_V    = {_clamp_tcp_speed("PROBE_DESCENT_V", s.probe_descent_v, cap):.4f}',
+        f'global PROBE_ACCEL        = {s.probe_accel}',
+        f'global PROBE_MAX_TRAVEL   = {s.probe_max_travel}',
         # PROBE_TILT_MAX_RAD / NHAT_* / NOMINAL_P{i} : globals du sondage 3 points
         # (DESACTIVE). Non emis. NOMINAL_FRAME et MEAS_FRAME restent requis par les
         # cycles (apply_correction + force_mode) ; le sondage Z 1 point ecrit la
@@ -387,9 +412,11 @@ end
         lines.append(f'  # --- {cyc["label"]} ---')
 
         px0, py0 = plate_to_robot(pts[0, 0], pts[0, 1])
-        pose_transit_in = _fmt_pose([px0, py0, z_transit_m, ROBOT_RX, ROBOT_RY, ROBOT_RZ])
-        pose_contact_deep = _fmt_pose([px0, py0, ROBOT_Z_SURFACE - FORCE_CONTACT_DEPTH,
-                                       ROBOT_RX, ROBOT_RY, ROBOT_RZ])
+        pose_transit_in = _fmt_pose([px0, py0, z_transit_m,
+                                     s.robot_rx, s.robot_ry, s.robot_rz])
+        pose_contact_deep = _fmt_pose([px0, py0,
+                                       s.robot_z_surface - s.force_contact_depth,
+                                       s.robot_rx, s.robot_ry, s.robot_rz])
 
         lines.append(f'  movel(apply_correction({pose_transit_in}), '
                      f'a=URSCRIPT_ACCEL*ACCEL_FACTOR, v={transit_v_mps:.4f}*SPEED_FACTOR)')
@@ -401,9 +428,9 @@ end
         # avant arret ("Force mode: Maximum position deviation exceeded").
         # FORCE_LIMIT_XY trop faible faisait fauter l'etalement (traine du doigt).
         lines.append(f'  force_mode(MEAS_FRAME, [0, 0, 1, 0, 0, 0], '
-                     f'[0, 0, {-FORCE_Z_TARGET:.1f}, 0, 0, 0], 2, '
-                     f'[{FORCE_LIMIT_XY}, {FORCE_LIMIT_XY}, {FORCE_LIMIT_Z}, '
-                     f'{FORCE_LIMIT_ROT}, {FORCE_LIMIT_ROT}, {FORCE_LIMIT_ROT}])')
+                     f'[0, 0, {-s.force_z_target:.1f}, 0, 0, 0], 2, '
+                     f'[{s.force_limit_xy}, {s.force_limit_xy}, {s.force_limit_z}, '
+                     f'{s.force_limit_rot}, {s.force_limit_rot}, {s.force_limit_rot}])')
         lines.append(f'  movel(apply_correction({pose_contact_deep}), '
                      f'a=URSCRIPT_ACCEL*ACCEL_FACTOR, v=URSCRIPT_RECONTACT_V*SPEED_FACTOR)')
 
@@ -412,12 +439,14 @@ end
             waypoint_indices = get_waypoint_indices(len(pts), cyc['type'])
         for i in waypoint_indices:
             px, py = plate_to_robot(pts[i, 0], pts[i, 1])
-            pose_wp = _fmt_pose([px, py, ROBOT_Z_SURFACE, ROBOT_RX, ROBOT_RY, ROBOT_RZ])
+            pose_wp = _fmt_pose([px, py, s.robot_z_surface,
+                                 s.robot_rx, s.robot_ry, s.robot_rz])
             lines.append(f'  movel(apply_correction({pose_wp}), '
                          f'a=URSCRIPT_ACCEL*ACCEL_FACTOR, v={spd_var}*SPEED_FACTOR, r=URSCRIPT_BLEND)')
 
         px_last, py_last = plate_to_robot(pts[-1, 0], pts[-1, 1])
-        pose_transit_out = _fmt_pose([px_last, py_last, z_transit_m, ROBOT_RX, ROBOT_RY, ROBOT_RZ])
+        pose_transit_out = _fmt_pose([px_last, py_last, z_transit_m,
+                                      s.robot_rx, s.robot_ry, s.robot_rz])
         lines.append('  end_force_mode()')
         lines.append(f'  movel(apply_correction({pose_transit_out}), '
                      f'a=URSCRIPT_ACCEL*ACCEL_FACTOR, v={transit_v_mps:.4f}*SPEED_FACTOR)')
@@ -429,7 +458,8 @@ end
         # set_tcp intègre TCP_GRIPPER_Z (longueur de la 2F-85) dans l'offset TCP_Z.
         # C'est le SEUL endroit où la pince intervient : sa longueur, pas son
         # actionnement. Aucune activation / ouverture / fermeture n'est commandée.
-        f'  set_tcp(p[{mm_to_m(TCP_X)}, {mm_to_m(TCP_Y)}, {mm_to_m(TCP_Z)}, 0, 0, 0])',
+        f'  set_tcp(p[{mm_to_m(params.TCP_X)}, {mm_to_m(params.TCP_Y)}, '
+        f'{mm_to_m(s.tcp_z)}, 0, 0, 0])',
         '  # Aucune pose home absolue : la position de depart est la pose courante',
         '  # du robot (mesuree a l\'execution). L\'operateur jogge le robot ou il',
         '  # veut, clique Start, et le sondage de surface part de la.',
@@ -450,37 +480,128 @@ end
     # validee par ur5_sim (contrairement a un get_actual_tcp_pose() runtime).
     # px_last / py_last conservent les coords robot du dernier waypoint du
     # dernier cycle (portee de la boucle ci-dessus).
-    z_retreat_end_m = ROBOT_Z_SURFACE + mm_to_m(Z_RETREAT_END)
+    z_retreat_end_m = s.robot_z_surface + mm_to_m(s.z_retreat_end)
     pose_retreat_end = _fmt_pose([px_last, py_last, z_retreat_end_m,
-                                  ROBOT_RX, ROBOT_RY, ROBOT_RZ])
+                                  s.robot_rx, s.robot_ry, s.robot_rz])
     lines.append(f'  movel(apply_correction({pose_retreat_end}), '
                  f'a=URSCRIPT_ACCEL*ACCEL_FACTOR, v={transit_v_mps:.4f}*SPEED_FACTOR)')
     lines += ['end', '', 'etalement()']
     return lines
 
 
-def generate_urscript(cycles: list[dict], filename: Path = SCRIPT_PATH) -> bool:
+# État du dernier export, pour détecter un fichier retouché à la main. Le
+# `.urp` de référence a été ajusté manuellement pour des essais robot, et
+# `generate_urp` l'écrasait jusqu'ici sans le moindre avertissement.
+EXPORT_STATE_PATH: Path = params.REPO_ROOT / ".etalement_export_state.json"
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]
+
+
+def _load_export_state() -> dict[str, str]:
+    if not EXPORT_STATE_PATH.is_file():
+        return {}
+    try:
+        return json.loads(EXPORT_STATE_PATH.read_text(encoding='utf-8'))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _record_export(filename: Path, content: str) -> None:
+    state = _load_export_state()
+    state[filename.name] = _digest(content)
+    try:
+        EXPORT_STATE_PATH.write_text(
+            json.dumps(state, indent=2, sort_keys=True) + '\n',
+            encoding='utf-8')
+    except OSError as exc:
+        print(f"WARN: etat d'export non enregistre ({exc}).")
+
+
+def check_overwrite(filename: Path) -> str | None:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Dit si le fichier de sortie a ete retouche depuis le dernier export,
+        auquel cas l'ecraser detruirait un reglage saisi a la main.
+
+        Un fichier inconnu de l'etat d'export ne declenche rien : on ne sait
+        pas d'ou il vient, et refuser le premier export de chaque poste serait
+        une nuisance sans contrepartie.
+
+    Inputs:
+        filename (Path): fichier de sortie vise.
+
+    Outputs:
+        message (str | None): avertissement a montrer, None si l'ecrasement
+        est sans risque.
+    --------------------------------------------------------------------------
+    """
+    filename = Path(filename)
+    if not filename.is_file():
+        return None
+    known = _load_export_state().get(filename.name)
+    if known is None:
+        return None
+    try:
+        current = _digest(filename.read_text(encoding='utf-8'))
+    except OSError:
+        return None
+    if current == known:
+        return None
+    return (f"{filename.name} a ete modifie depuis le dernier export "
+            f"(empreinte {current} au lieu de {known}). L'ecraser perdrait "
+            f"ces retouches. Relancer avec force=True pour passer outre, ou "
+            f"exporter sous un autre nom.")
+
+
+def _write_export(filename: Path, content: str, label: str,
+                  force: bool) -> bool:
+    """Ecrit un fichier de sortie apres controle d'ecrasement."""
+    filename = Path(filename)
+    warning = check_overwrite(filename)
+    if warning and not force:
+        print(f"ECHEC EXPORT {label}: {warning}")
+        return False
+    if warning:
+        print(f"WARN: {warning}")
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    filename.write_text(content, encoding='utf-8')
+    _record_export(filename, content)
+    return True
+
+
+def generate_urscript(cycles: list[dict], filename: Path = SCRIPT_PATH,
+                      settings: Settings | None = None,
+                      force: bool = False) -> bool:
     """
     Génère un fichier URScript exécutable sur le contrôleur UR5.
-    Retourne False si le budget mémoire PolyScope est dépassé.
+    Retourne False si le fichier a été retouché à la main (sauf force=True)
+    ou si le budget mémoire PolyScope est dépassé.
     """
-    lines = _build_urscript_lines(cycles)
+    lines = _build_urscript_lines(cycles, settings)
     filename = Path(filename)
-    filename.parent.mkdir(parents=True, exist_ok=True)
-    with open(filename, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines))
+    if not _write_export(filename, '\n'.join(lines), "URScript", force):
+        return False
     print(f'URScript exporté -> {filename}  ({len(lines)} lignes)')
     return _validate_script_memory(filename, "URScript")
 
 
-def generate_urp(cycles: list[dict], filename: Path = URP_PATH) -> bool:
+def generate_urp(cycles: list[dict], filename: Path = URP_PATH,
+                 settings: Settings | None = None,
+                 force: bool = False) -> bool:
     """
     Génère un fichier .urp (XML PolyScope) exécutable sur UR3/UR5/UR10.
+
+    Refuse d'écraser un `.urp` retouché à la main tant que force=True n'est pas
+    passé : le fichier de référence porte des réglages d'essai robot saisis
+    directement sur le pendant.
     """
     import xml.etree.ElementTree as ET
     from xml.dom import minidom
 
-    script_content = '\n'.join(_build_urscript_lines(cycles))
+    script_content = '\n'.join(_build_urscript_lines(cycles, settings))
 
     root = ET.Element('program')
     root.set('version', '6.0')
@@ -498,8 +619,7 @@ def generate_urp(cycles: list[dict], filename: Path = URP_PATH) -> bool:
     xml_out = '\n'.join(xml_lines)
 
     filename = Path(filename)
-    filename.parent.mkdir(parents=True, exist_ok=True)
-    with open(filename, 'w', encoding='utf-8') as f:
-        f.write(xml_out)
+    if not _write_export(filename, xml_out, "URP", force):
+        return False
     print(f'URP exporté -> {filename}')
     return _validate_script_memory(filename, "URP")

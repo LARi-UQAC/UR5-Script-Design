@@ -169,11 +169,13 @@ mode actuel.
 3. Exécuter `python -m ur5_sim --check` et
    `python -m unittest discover -s tests -p "test_*.py"` pour établir la
    référence avant modification.
-4. Suivre les phases de la section 7, dans l'ordre, avec le plugin Superpowers
-   (sous-section 7.1). La phase 2 a un critère d'acceptation strict : à réglages
-   par défaut, le `.script` généré doit être identique octet pour octet à la
-   référence.
-5. Mettre à jour `README.md`, `ARCHITECTURE.md` et `CLAUDE.md` à la phase 8 :
+4. Lire la sous-section 7.0 : elle fixe qui exécute quoi, le budget, et ce qui
+   est volontairement laissé de côté.
+5. Suivre les phases de la section 7.1, dans l'ordre, avec la sélection réduite
+   de compétences Superpowers de la sous-section 7.2. La phase 2 a un critère
+   d'acceptation strict : à réglages par défaut, le `.script` généré doit être
+   identique octet pour octet à la référence.
+6. Mettre à jour `README.md`, `ARCHITECTURE.md` et `CLAUDE.md` à la phase 8 :
    aucun livrable n'est complet sans cette mise à jour.
 
 ---
@@ -388,6 +390,7 @@ seule : ne jamais le rendre saisissable indépendamment de ses composantes.
 | A - widgets matplotlib | `TextBox` et `RadioButtons` dans une seconde figure | aucune dépendance nouvelle, cohérent avec l'existant | ingérable au-delà d'une dizaine de champs : pas d'onglets, pas de défilement, placement manuel de chaque axe, validation pauvre |
 | B - fenêtre Tkinter | `Toplevel` avec onglets `ttk.Notebook`, un `Entry` par champ | stdlib, vrais widgets de formulaire, onglets, défilement, validation par champ, boutons OK / Annuler | code IHM à écrire, cohabitation avec la boucle matplotlib à soigner |
 | C - fichier JSON édité à la main | l'opérateur édite `etalement_settings.json` dans VS Code | trivial à implémenter, versionnable, revue facile | ce n'est pas une interface ; pas de bornes, pas d'unités, pas de garde-fou |
+| D - page web locale servie par `http.server` | formulaire HTML sur `127.0.0.1`, ouvert dans le navigateur | testable par Playwright, précédent dans le projet avec le viewer Swift | deux processus et un port de plus à gérer pour une simple saisie de valeurs, l'opérateur quitte la fenêtre matplotlib pour un onglet ; écarté, voir 5.1 |
 
 Recommandation : **B, avec la persistance de C**. Le backend matplotlib par
 défaut sous Windows est TkAgg, donc une racine Tk existe déjà quand la figure
@@ -395,7 +398,27 @@ est ouverte : la fenêtre de réglages est un `Toplevel` de cette racine, sans
 seconde `mainloop`, sans dépendance ajoutée. Le JSON reste le format de
 sauvegarde, éditable à la main pour un cas pressé.
 
-### 5.1 Maquette
+### 5.1 Option D et Playwright, écartées
+
+Une validation de l'IHM par Playwright a été envisagée le 15 août 2026, puis
+abandonnée le même jour. Playwright ne pilote que des navigateurs (Chromium,
+Firefox, WebKit) : il n'existe aucun pilote Tk. Le rendre applicable aurait
+imposé l'option D, c'est-à-dire remplacer la fenêtre Tk par une page web servie
+en local, donc un serveur, un port et un onglet de navigateur pour saisir une
+trentaine de nombres. Le rapport coût-bénéfice ne le justifie pas pour une
+interface de saisie qui n'est pas un système critique.
+
+La validation de l'IHM se fait donc par `unittest`, en instanciant la fenêtre
+sans la montrer et en pilotant les widgets par leur API (`insert`, `get`,
+appel direct des callbacks). Cela couvre ce qui compte ici, la **capture des
+valeurs** et la propagation vers `Settings`, sans couvrir le rendu visuel, qui
+reste vérifié à l'oeil par l'opérateur. Voir `tests/test_ui_settings.py` dans la
+table des tests.
+
+Note pour une session future : ne pas reproposer Playwright pour cette fenêtre.
+La question a été tranchée.
+
+### 5.2 Maquette
 
 ```text
 +----------------------------------------------------------------------+
@@ -423,7 +446,7 @@ Chaque ligne porte quatre informations : le libellé, la valeur saisissable,
 l'unité, et le défaut codé en dur avec les bornes. L'opérateur voit donc en
 permanence de combien il s'écarte de la référence.
 
-### 5.2 Comportement des boutons
+### 5.3 Comportement des boutons
 
 - **Appliquer** : valide tous les champs, met à jour l'objet `Settings` en
   mémoire, rafraîchit la figure de trajectoire si un champ géométrique a changé.
@@ -514,60 +537,137 @@ cette interface en place, ce n'est plus nécessaire, et cela redevient risqué :
 
 ## 7. Étapes d'implémentation
 
-**Phase 1 - Couche de réglages.** `design/settings.py` : dataclass, table des
-métadonnées (unité, bornes, libellé, groupe), `from_file`, `save`, `reset`,
+### 7.0 Cadre d'exécution, arrêté le 15 août 2026
+
+**Livraison en une seule session.** Les huit phases sont exécutées dans la même
+session Claude Code, sans reprise ultérieure. C'est ce qui dicte les arbitrages
+ci-dessous.
+
+**Répartition modèle par phase.**
+
+| Phase | Exécutant | Motif |
+| :--- | :--- | :--- |
+| 1 - Couche de réglages | Opus, en session, sans sous-agent | fonde le contrat que lisent toutes les autres phases |
+| 2 - Exporteur | Opus, en session, sans sous-agent | lève l'obstacle de la section 2 sous une contrainte d'identité octet pour octet ; une trentaine de constantes à tracer dans un fichier de 505 lignes |
+| 3 - Simulateur | Opus, en session, sans sous-agent | second consommateur des réglages, même piège d'import par valeur |
+| 4 - Fenêtre de réglages | sous-agent Sonnet | code IHM mécanique, engendré depuis la table de métadonnées, périmètre clos |
+| 5 - Intégration | Opus, en session, sans sous-agent | supprime `_build_circular_with_params` et unifie cinq curseurs avec `Settings` ; état partagé, terrain à bogues subtils |
+| 6 - Traçabilité | Opus, en session, sans sous-agent | touche l'en-tête émis, donc l'invariant d'identité de la phase 2 |
+| 7 - Persistance | sous-agent Sonnet | `.gitignore`, fichier d'exemple, chargement au démarrage, bannière |
+| 8 - Documentation | sous-agent Sonnet | mise à jour de trois documents selon la table 7.3 |
+
+Les trois sous-agents Sonnet sont lancés une fois les phases 1 à 3 terminées,
+c'est-à-dire une fois le contrat `Settings` figé. La phase 4 dépend de la table
+de métadonnées, la phase 8 dépend du code livré : la 8 part en dernier.
+
+**Aucun sous-agent d'exploration.** Pas de sous-agent chargé de chercher des
+solutions de rechange ni de contester la conception. Ce document est la
+conception retenue ; sa remise en cause n'est pas au programme de cette session.
+Un désaccord constaté pendant l'exécution se signale en une phrase et se tranche
+avec l'opérateur, il ne déclenche pas une étude parallèle.
+
+**Budget de jetons contraint, et proportionné à l'enjeu.** Il s'agit d'une
+interface de saisie de valeurs, pas d'un système critique. Conséquences
+assumées :
+
+- discipline de test différenciée : le test d'abord (`test-driven-development`)
+  s'applique aux phases 1, 2 et 3, là où une régression est silencieuse et
+  coûteuse ; les phases 4, 7 et 8 sont testées après coup, ce qui suffit pour du
+  code d'IHM et de la documentation ;
+- quatre fichiers de tests au lieu de sept, par regroupement, sans perte de
+  couverture (voir la table des tests) ;
+- pas de revue croisée multi-modèles, pas de délibération, pas de recherche
+  bibliographique ;
+- les valeurs de sécurité gardent en revanche leur garde-fou complet : la
+  lecture seule sur `URSCRIPT_MAX_TCP_SPEED` et `URSCRIPT_MAX_BYTES`, le
+  verrouillage de l'onglet calibration et le refus hors bornes ne sont pas des
+  variables d'ajustement du budget.
+
+**Exigence d'IHM rappelée.** L'interface doit permettre de saisir la valeur
+souhaitée **et** afficher en permanence la valeur par défaut correspondante,
+avec son unité et ses bornes, sur la même ligne. C'est la maquette 5.2, et c'est
+un critère de recette, pas une suggestion de présentation.
+
+### 7.1 Les huit phases
+
+**Phase 1 - Couche de réglages** (Opus). `design/settings.py` : dataclass, table
+des métadonnées (unité, bornes, libellé, groupe), `from_file`, `save`, `reset`,
 `validate`, `get_settings`. Aucun changement de comportement à ce stade.
 
-**Phase 2 - Exporteur.** `_build_urscript_lines(cycles, settings=None)` lit
-`get_settings()` ; suppression des imports par valeur dans `design/export.py`.
-Test de non-régression : à réglages par défaut, le `.script` généré est
-strictement identique à l'actuel, octet pour octet.
+**Phase 2 - Exporteur** (Opus). `_build_urscript_lines(cycles, settings=None)`
+lit `get_settings()` ; suppression des imports par valeur dans
+`design/export.py`. Test de non-régression : à réglages par défaut, le `.script`
+généré est strictement identique à l'actuel, octet pour octet.
 
-**Phase 3 - Simulateur.** `ur5_sim/config.py` lit le même fichier de réglages ;
-`--check` affiche la source et les écarts aux défauts.
+**Phase 3 - Simulateur** (Opus). `ur5_sim/config.py` lit le même fichier de
+réglages ; `--check` affiche la source et les écarts aux défauts.
 
-**Phase 4 - Fenêtre de réglages.** `design/ui_settings.py` : `Toplevel` Tk,
-`ttk.Notebook` à cinq onglets, génération des lignes à partir de la table de
-métadonnées (pas de code répété par champ), validation, boutons.
+**Phase 4 - Fenêtre de réglages** (sous-agent Sonnet). `design/ui_settings.py` :
+`Toplevel` Tk, `ttk.Notebook` à cinq onglets, génération des lignes à partir de
+la table de métadonnées (pas de code répété par champ), validation, boutons.
+Chaque ligne affiche libellé, champ de saisie, unité, défaut et bornes. Livre
+aussi `tests/test_ui_settings.py`.
 
-**Phase 5 - Intégration.** Bouton « Paramètres » dans la barre de
+**Phase 5 - Intégration** (Opus). Bouton « Paramètres » dans la barre de
 `design/app.py`, unification des cinq curseurs existants avec `Settings`,
 option de nom de fichier de sortie, avertissement d'écrasement.
 
-**Phase 6 - Traçabilité.** Bloc « réglages utilisés » et empreinte dans
+**Phase 6 - Traçabilité** (Opus). Bloc « réglages utilisés » et empreinte dans
 l'en-tête du script et du `.urp`.
 
-**Phase 7 - Persistance.** `etalement_settings.json` ajouté au `.gitignore`,
-`etalement_settings.example.json` versionné, chargement au démarrage avec
-bannière listant les écarts aux défauts.
+**Phase 7 - Persistance** (sous-agent Sonnet). `etalement_settings.json` ajouté
+au `.gitignore`, `etalement_settings.example.json` versionné, chargement au
+démarrage avec bannière listant les écarts aux défauts.
 
-**Phase 8 - Documentation** (obligatoire, pas optionnelle) : mettre `README.md`,
-`ARCHITECTURE.md` et `CLAUDE.md` au niveau du code livré, détail en 7.2. Une
-phase n'est terminée que lorsque la documentation correspondante est à jour ;
-sinon la prochaine session à froid repart sur une carte du code fausse.
+**Phase 8 - Documentation** (sous-agent Sonnet ; obligatoire, pas optionnelle) :
+mettre `README.md`, `ARCHITECTURE.md` et `CLAUDE.md` au niveau du code livré,
+détail en 7.3. Une phase n'est terminée que lorsque la documentation
+correspondante est à jour ; sinon la prochaine session à froid repart sur une
+carte du code fausse.
 
-### 7.1 Exécution avec le plugin Superpowers
+### 7.2 Exécution avec le plugin Superpowers
 
-L'exécution de ce plan passe par les compétences du plugin Superpowers, invoquées
-avec l'outil `Skill` et annoncées avant usage. Séquence attendue :
+Sélection réduite au strict nécessaire, conformément au budget arrêté en 7.0.
+Chaque compétence est invoquée avec l'outil `Skill` et annoncée avant usage.
 
 | Moment | Compétence | Usage ici |
 | :--- | :--- | :--- |
-| Avant de toucher au code | `superpowers:using-git-worktrees` | isoler la branche de travail |
-| Au démarrage de l'exécution | `superpowers:executing-plans` | dérouler les phases avec points de contrôle |
-| À chaque phase de code | `superpowers:test-driven-development` | test en échec d'abord ; le test d'identité octet pour octet de la phase 2 et la régression sur les imports par valeur sont les cas d'école |
+| Au démarrage | `superpowers:executing-plans` | dérouler les huit phases avec un point de contrôle par phase |
+| Phases 1, 2, 3 | `superpowers:test-driven-development` | test en échec d'abord ; l'identité octet pour octet de la phase 2 et la régression sur les imports par valeur sont les deux cas d'école. Non appliqué aux phases 4, 7 et 8 |
 | Sur tout écart de comportement | `superpowers:systematic-debugging` | notamment si le script généré change alors que les réglages sont aux défauts |
-| Phases indépendantes | `superpowers:subagent-driven-development` ou `superpowers:dispatching-parallel-agents` | par exemple la fenêtre Tk (phase 4) et l'adaptation du simulateur (phase 3) |
-| Avant fusion | `superpowers:requesting-code-review` puis `superpowers:receiving-code-review` | revue, puis traitement rigoureux des retours |
 | Avant toute annonce d'achèvement | `superpowers:verification-before-completion` | aucune affirmation de succès sans sortie de commande à l'appui |
-| Fin de branche | `superpowers:finishing-a-development-branch` | décision d'intégration, fusion vers `main` validée par l'humain |
+| Fin de branche | `superpowers:finishing-a-development-branch` | décision d'intégration, fusion validée par l'humain |
 
-La conception est déjà faite : ce document est le produit de
-`superpowers:brainstorming`. Ne relancer cette compétence que si le périmètre
-change. Pour une granularité tâche par tâche, dériver un plan d'exécution avec
-`superpowers:writing-plans` sans réécrire ce document.
+Écartées pour cette session, et pourquoi : `using-git-worktrees` (une simple
+branche `feat/settings-ui` suffit, les trois sous-agents écrivent dans des
+fichiers disjoints, voir 7.2.1) ; `subagent-driven-development` et
+`dispatching-parallel-agents` (la répartition est déjà fixée en 7.0, inutile de
+la redériver) ; `requesting-code-review` et `receiving-code-review` (revue
+croisée coûteuse, sans commune mesure avec l'enjeu d'une fenêtre de saisie) ;
+`brainstorming` (ce document en est déjà le produit, ne le relancer que si le
+périmètre change).
 
-### 7.2 Documentation à mettre à jour
+#### 7.2.1 Propriété des fichiers, pour éviter les écritures concurrentes
+
+Les sous-agents Sonnet travaillent dans le même arbre de travail. Chaque fichier
+a donc un propriétaire unique par phase.
+
+| Fichier | Propriétaire |
+| :--- | :--- |
+| `design/settings.py` | phase 1 (Opus), puis phase 7 pour la seule fonction de chargement au démarrage |
+| `design/export.py` | phases 2 et 6 (Opus) |
+| `ur5_sim/config.py`, `ur5_sim/cli.py` | phase 3 (Opus) |
+| `design/ui_settings.py`, `tests/test_ui_settings.py` | phase 4 (Sonnet) |
+| `design/app.py` | phase 5 (Opus) **exclusivement** |
+| `.gitignore`, `etalement_settings.example.json` | phase 7 (Sonnet) |
+| `README.md`, `ARCHITECTURE.md`, `CLAUDE.md` | phase 8 (Sonnet) |
+
+Point de friction identifié : la bannière d'écarts au démarrage relève de la
+phase 7 par son contenu mais de `design/app.py` par son emplacement. Le
+sous-agent de la phase 7 livre la fonction qui calcule la bannière et **ne
+touche pas** à `design/app.py` ; c'est la phase 5 qui pose l'appel.
+
+### 7.3 Documentation à mettre à jour
 
 | Fichier | Section | Mise à jour attendue |
 | :--- | :--- | :--- |
@@ -584,18 +684,24 @@ change. Pour une granularité tâche par tâche, dériver un plan d'exécution a
 Vérifier que les liens des documents modifiés résolvent et que les numéros de
 ligne cités dans ce plan sont corrigés s'ils ont bougé.
 
-### Tests
+### 7.4 Tests
 
-| Test | Objet |
-| :--- | :--- |
-| `tests/test_settings_roundtrip.py` | `save` puis `from_file` restitue les mêmes valeurs ; seules les surcharges sont écrites |
-| `tests/test_settings_defaults.py` | tous les défauts du dataclass correspondent aux constantes de `design/params.py` |
-| `tests/test_export_uses_settings.py` | régression sur l'obstacle de la section 2 : modifier `Settings` change réellement le `.script` généré |
-| `tests/test_settings_validation.py` | valeurs hors bornes refusées, clamps appliqués et signalés |
-| `tests/test_sim_reads_settings.py` | `ur5_sim/config` reflète le JSON quand il existe, les défauts sinon |
-| `tests/test_export_identity.py` | à réglages par défaut, sortie identique à la référence courante |
+Quatre fichiers au lieu des sept d'abord envisagés. Le regroupement suit la
+frontière des modules, pas celle des cas de test : la couverture est identique,
+seul le nombre de fichiers et d'entêtes baisse.
+
+| Test | Phase | Objet |
+| :--- | :--- | :--- |
+| `tests/test_settings.py` | 1 | trois classes. `RoundTrip` : `save` puis `from_file` restitue les mêmes valeurs, et seules les surcharges sont écrites. `Defaults` : chaque défaut du dataclass est égal à la constante de `design/params.py` correspondante. `Validation` : valeurs hors bornes refusées, clamps appliqués et signalés |
+| `tests/test_export_settings.py` | 2, 6 | deux classes. `Identity` : à réglages par défaut, le `.script` généré est identique octet pour octet à la référence courante. `UsesSettings` : régression sur l'obstacle de la section 2, modifier `Settings` change réellement le `.script` généré. Le bloc de traçabilité de la phase 6 est neutralisé pendant la comparaison d'identité, sa date et son empreinte variant par construction |
+| `tests/test_sim_reads_settings.py` | 3 | `ur5_sim/config` reflète le JSON quand il existe, les défauts sinon |
+| `tests/test_ui_settings.py` | 4 | **capture des valeurs**, sans Playwright et sans afficher la fenêtre. Instancie la fenêtre sur une racine Tk non mappée (`withdraw()`), écrit dans les widgets par `insert`, appelle les callbacks des boutons, puis vérifie l'objet `Settings`. Cas couverts : une valeur valide se propage ; une valeur hors bornes est refusée sans qu'aucun champ ne soit appliqué ; le défaut affiché à côté de chaque champ correspond bien à `design/params.py` ; « Réinitialiser » ramène tous les champs aux défauts ; les champs en lecture seule et l'onglet calibration verrouillé refusent l'édition. Encadré par `unittest.skipUnless` sur la disponibilité de Tk |
 
 Exécution : `python -m unittest discover -s tests -p "test_*.py"`.
+
+Un test manque volontairement : le **rendu visuel** de la fenêtre. Il est
+vérifié à l'oeil par l'opérateur au point 9 de la vérification. Automatiser un
+contrôle de rendu Tk coûterait plus que ce que vaut le risque ici.
 
 ---
 
@@ -605,6 +711,9 @@ Exécution : `python -m unittest discover -s tests -p "test_*.py"`.
   n'utilise pas donne une fausse impression de contrôle. La table de
   métadonnées doit être vérifiée par un test qui confirme que chaque champ
   exposé apparaît bien dans le script généré ou dans le calcul de trajectoire.
+  Ce test appartient à la classe `UsesSettings` de
+  `tests/test_export_settings.py` : il boucle sur la table plutôt que
+  d'énumérer les champs à la main, sinon il vieillit mal.
 - **Les valeurs de sécurité.** `URSCRIPT_MAX_TCP_SPEED` et `URSCRIPT_MAX_BYTES`
   sont des limites du contrôleur, pas des préférences : lecture seule.
 - **La calibration.** Onglet verrouillé, confirmation explicite, et jamais de
@@ -619,6 +728,20 @@ Exécution : `python -m unittest discover -s tests -p "test_*.py"`.
   profondeur de contact de 1 mm. Un contrôle croisé minimal
   (`FORCE_CONTACT_DEPTH` compatible avec `FORCE_LIMIT_Z` et la vitesse de
   recontact) évite les combinaisons manifestement dangereuses.
+- **Le contrat `Settings` figé trop tard.** Les trois sous-agents de 7.0
+  dépendent tous de la table de métadonnées. La lancer avant la fin de la phase
+  1 produirait trois implémentations d'un contrat encore mouvant, donc trois
+  reprises. Le point de contrôle de fin de phase 3 est le verrou : rien ne part
+  avant.
+- **Écriture concurrente sur `design/app.py`.** Deux phases ont une raison
+  légitime d'y toucher, la 5 et la 7. La table 7.2.1 tranche : seule la phase 5
+  y écrit. Ne pas la contourner sous prétexte que la modification est d'une
+  ligne.
+- **La livraison en une session.** Contrainte posée en 7.0. Si le temps manque,
+  couper par la fin : les phases 6, 7 et 8 sont les moins couplées au reste et
+  se reportent le mieux. Ne jamais couper dans les phases 1 à 3, qui laisseraient
+  le dépôt à moitié converti, avec un exporteur qui lit les réglages et un
+  simulateur qui lit encore les défauts.
 
 ---
 
@@ -637,9 +760,15 @@ Exécution : `python -m unittest discover -s tests -p "test_*.py"`.
 5. « Réinitialiser » : tous les champs reviennent aux valeurs de
    `design/params.py`.
 6. `python -m ur5_sim --check` reflète les réglages du JSON, pas les défauts.
-7. Tests unitaires au vert.
+7. Tests unitaires au vert, les quatre fichiers de la table 7.4 compris.
 8. `README.md`, `ARCHITECTURE.md` et `CLAUDE.md` décrivent le code livré
-   (table 7.2), et les liens résolvent.
+   (table 7.3), et les liens résolvent.
+9. Contrôle visuel par l'opérateur, seul point non automatisé : ouvrir la
+   fenêtre, parcourir les cinq onglets, et vérifier que chaque ligne porte bien
+   ses quatre informations, libellé, champ de saisie, unité, défaut avec bornes.
+   Vérifier aussi que l'onglet calibration s'ouvre verrouillé et que
+   `URSCRIPT_MAX_TCP_SPEED`, `URSCRIPT_MAX_BYTES` et `TCP_Z` sont affichés sans
+   être saisissables.
 
 ---
 
@@ -648,4 +777,6 @@ Exécution : `python -m unittest discover -s tests -p "test_*.py"`.
 | Date | Modification |
 | :--- | :--- |
 | 29 juillet 2026 | Création. Périmètre : interface de saisie des variables du protocole, distincte de l'interface de tracé existante. Obstacle des imports par valeur identifié comme préalable. Inventaire en cinq groupes, onglet calibration verrouillé, Tkinter retenu avec persistance JSON, articulation avec la force devenue globale URScript et avec l'option de sondage |
-| 29 juillet 2026 (suite) | Section 0 de contexte pour reprise à froid. Phase 8 « Documentation » séparée de la persistance, avec la table 7.2 (`README.md`, `ARCHITECTURE.md`, `CLAUDE.md`) et le critère de vérification associé. Sous-section 7.1 : exécution pilotée par le plugin Superpowers |
+| 29 juillet 2026 (suite) | Section 0 de contexte pour reprise à froid. Phase 8 « Documentation » séparée de la persistance, avec la table 7.2, devenue 7.3 (`README.md`, `ARCHITECTURE.md`, `CLAUDE.md`) et le critère de vérification associé. Sous-section 7.1, devenue 7.2 : exécution pilotée par le plugin Superpowers |
+| 15 août 2026 | Cadre d'exécution arrêté (nouvelle sous-section 7.0) : livraison en une seule session ; phases 1, 2, 3, 5, 6 exécutées par Opus en session sans sous-agent, phases 4, 7, 8 déléguées à trois sous-agents Sonnet lancés après le gel du contrat `Settings` ; aucun sous-agent d'exploration ou de contestation de la conception ; budget de jetons contraint et proportionné, l'interface n'étant pas un système critique. Nouvelle table 7.2.1 de propriété des fichiers, `design/app.py` réservé à la phase 5. Renumérotation : 7.1 devient 7.2, 7.2 devient 7.3, les tests deviennent 7.4 |
+| 15 août 2026 (suite) | Validation par Playwright envisagée puis écartée le jour même : Playwright ne pilote que des navigateurs, l'appliquer aurait imposé de remplacer la fenêtre Tk par une page web locale (option D, ajoutée à la table de la section 5 pour mémoire). Tkinter conservé. La capture des valeurs est vérifiée par `tests/test_ui_settings.py`, en `unittest`, sur une racine Tk non mappée. Motif consigné en 5.1 pour éviter que la question soit reposée. Tests regroupés de sept fichiers à quatre, à couverture égale (table 7.4). Trois risques ajoutés en section 8 : contrat figé trop tard, écriture concurrente sur `design/app.py`, ordre de coupe si le temps manque |

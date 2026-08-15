@@ -4,8 +4,13 @@ design/app.py — Interface graphique matplotlib pour le design de trajectoires.
 Responsabilités :
   - Affiche 6 sous-graphiques (un par cycle) avec trajectoires colorées.
   - Sliders : points de discrétisation, CIRC_R_CIRCLE, N_CIRCULAR_CYCLES,
-    CIRC_N_PASSES, CIRC_N_CIRCLES.
-  - Boutons : Afficher Waypoints, Tri/Rect, Exporter URScript.
+    CIRC_N_PASSES, CIRC_N_CIRCLES. Ce sont des vues sur design.settings :
+    ils écrivent dans l'objet Settings, que les générateurs relisent à
+    l'appel. Une seule source de vérité (plan_variables_UI.md, section 6.3).
+  - Boutons : Afficher Waypoints, Tri/Rect, Exporter URScript, Paramètres
+    (ouvre design.ui_settings, la fenêtre de réglage des valeurs).
+  - Champ « Sortie » : nom du fichier exporté, pour produire des variantes
+    d'essai sans écraser le fichier de référence.
   - Overlay live TCP depuis le simulateur (via design.live_ipc).
   - Fonction main() : point d'entrée CLI.
 """
@@ -18,11 +23,12 @@ from typing import Any, List
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.widgets import Button, Slider
+from matplotlib.widgets import Button, Slider, TextBox
 
 import design.params as P
 from design.export import generate_urscript, generate_urp
 from design.live_ipc import build_ipc_overlay
+from design.settings import get_settings, startup_banner
 from design.trajectory import (
     build_full_trajectory,
     circular_cycle,
@@ -37,12 +43,13 @@ from design.trajectory import (
 # ---------------------------------------------------------------------------
 
 def _style_ax(ax, title: str) -> None:
+    s = get_settings()
     ax.set_facecolor('#16213e')
     ax.add_patch(mpatches.Rectangle(
-        (0, 0), P.SURFACE_W, P.SURFACE_H,
+        (0, 0), s.surface_w, s.surface_h,
         linewidth=1.5, edgecolor='white', facecolor='none', linestyle='--'))
-    ax.set_xlim(-5, P.SURFACE_W + 5)
-    ax.set_ylim(-5, P.SURFACE_H + 5)
+    ax.set_xlim(-5, s.surface_w + 5)
+    ax.set_ylim(-5, s.surface_h + 5)
     ax.set_aspect('equal')
     ax.set_title(title, color='white', fontsize=9, pad=4)
     ax.tick_params(colors='#aaaaaa', labelsize=7)
@@ -54,7 +61,8 @@ def _style_ax(ax, title: str) -> None:
 
 def draw_validation_grid(ax) -> None:
     """Ajoute la grille de validation 9 points sur un axe matplotlib."""
-    coords = np.linspace(P.MARGIN, P.SURFACE_W - P.MARGIN, 3)
+    s = get_settings()
+    coords = np.linspace(s.margin, s.surface_w - s.margin, 3)
     idx = 1
     for y in reversed(coords):
         for x in coords:
@@ -93,17 +101,25 @@ def plot_static(cycles: list[dict]) -> Any:
     Construit la figure matplotlib avec 6 sous-graphiques et tous les widgets.
     Retourne la figure.
     """
+    s = get_settings()
     fig, axes = plt.subplots(2, 3, figsize=(14, 11))
     fig.patch.set_facecolor('#1a1a2e')
-    total_s = P.N_CIRCULAR_CYCLES * P.CIRC_DURATION + P.N_LINEAR_CYCLES * P.LIN_DURATION_ODD
+    total_s = (s.n_circular_cycles * s.circ_duration
+               + P.N_LINEAR_CYCLES * s.lin_duration_odd)
     fig.suptitle(
         f"UR5 - Protocole d'etalement cosmetique\n"
-        f"{int(P.SURFACE_W)} x {int(P.SURFACE_H)} mm | 6 cycles | Durée totale = {total_s:.0f} s",
+        f"{int(s.surface_w)} x {int(s.surface_h)} mm | {len(cycles)} cycles | "
+        f"Durée totale = {total_s:.0f} s",
         color='white', fontsize=13, fontweight='bold', y=0.98)
 
+    # Le curseur de discrétisation est une vue sur Settings. La valeur 0 y
+    # signifie « automatique », c'est-à-dire la densité naturelle du tracé :
+    # c'est le comportement historique, conservé comme défaut.
     min_pts, max_pts = 50, 2000
     natural_pts = max(len(cycles[i]['pts']) for i in range(3))
-    init_pts = min(max_pts, max(min_pts, natural_pts))
+    init_pts = (s.ui_discretization_points if s.ui_discretization_points
+                else min(max_pts, max(min_pts, natural_pts)))
+    init_pts = min(max_pts, max(min_pts, int(init_pts)))
 
     waypoint_scatters: List[Any] = []
     cycle_lines: List[Any] = []
@@ -155,58 +171,57 @@ def plot_static(cycles: list[dict]) -> Any:
 
     ax_r_circle = fig.add_axes([0.22, 0.455, 0.56, 0.02], facecolor='#0f3460')
     r_circle_slider = Slider(ax=ax_r_circle, label='CIRC_R_CIRCLE',
-                              valmin=0.0, valmax=10.0, valinit=float(P.CIRC_R_CIRCLE),
+                              valmin=0.0, valmax=10.0, valinit=float(s.circ_r_circle),
                               valstep=0.1, color='#ff8fab')
     r_circle_slider.label.set_color('white')
     r_circle_slider.valtext.set_color('white')
 
     ax_n_cycles = fig.add_axes([0.22, 0.422, 0.56, 0.02], facecolor='#0f3460')
     n_cycles_slider = Slider(ax=ax_n_cycles, label='N_CIRCULAR_CYCLES',
-                              valmin=0, valmax=10, valinit=int(P.N_CIRCULAR_CYCLES),
+                              valmin=0, valmax=10, valinit=int(s.n_circular_cycles),
                               valstep=1, color='#90be6d')
     n_cycles_slider.label.set_color('white')
     n_cycles_slider.valtext.set_color('white')
 
     ax_n_passes = fig.add_axes([0.22, 0.389, 0.56, 0.02], facecolor='#0f3460')
     n_passes_slider = Slider(ax=ax_n_passes, label='CIRC_N_PASSES',
-                              valmin=0, valmax=10, valinit=int(P.CIRC_N_PASSES),
+                              valmin=0, valmax=10, valinit=int(s.circ_n_passes),
                               valstep=1, color='#f9c74f')
     n_passes_slider.label.set_color('white')
     n_passes_slider.valtext.set_color('white')
 
     ax_n_circles = fig.add_axes([0.22, 0.356, 0.56, 0.02], facecolor='#0f3460')
     n_circles_slider = Slider(ax=ax_n_circles, label='CIRC_N_CIRCLES',
-                               valmin=1, valmax=60, valinit=int(P.CIRC_N_CIRCLES),
+                               valmin=1, valmax=60, valinit=int(s.circ_n_circles),
                                valstep=1, color='#43aa8b')
     n_circles_slider.label.set_color('white')
     n_circles_slider.valtext.set_color('white')
 
     # --- Callbacks sliders ---
-    def _build_circular_with_params(rotation_deg, radius_mm, n_passes, n_circles):
-        import design.params as _P
-        old_r, old_np, old_nc = _P.CIRC_R_CIRCLE, _P.CIRC_N_PASSES, _P.CIRC_N_CIRCLES
-        try:
-            _P.CIRC_R_CIRCLE = float(radius_mm)
-            _P.CIRC_N_PASSES = max(2, int(n_passes))
-            _P.CIRC_N_CIRCLES = max(1, int(n_circles))
-            return circular_cycle(rotation_deg=rotation_deg)
-        finally:
-            _P.CIRC_R_CIRCLE = old_r
-            _P.CIRC_N_PASSES = old_np
-            _P.CIRC_N_CIRCLES = old_nc
+    # Les curseurs sont des VUES sur l'objet Settings : ils y ecrivent, et les
+    # generateurs de trajectoire l'y relisent a l'appel. Le mecanisme de
+    # sauvegarde et restauration de design.params qui existait ici
+    # (_build_circular_with_params) a disparu avec la couche de reglages :
+    # il n'y a plus qu'une seule source de verite (plan, section 6.3).
+    def _push_sliders_to_settings():
+        cfg = get_settings()
+        cfg.ui_discretization_points = int(pts_slider.val)
+        cfg.circ_r_circle = float(r_circle_slider.val)
+        cfg.n_circular_cycles = min(3, max(0, int(round(n_cycles_slider.val))))
+        cfg.circ_n_passes = max(2, int(n_passes_slider.val))
+        cfg.circ_n_circles = max(1, int(n_circles_slider.val))
+        return cfg
 
     def update_discretization(val):
-        n_points = int(pts_slider.val)
+        cfg = _push_sliders_to_settings()
+        n_points = cfg.ui_discretization_points
         show_waypoints = waypoint_scatters[0].get_visible()
-        active_cycles = min(3, max(0, int(round(n_cycles_slider.val))))
-        radius = float(r_circle_slider.val)
-        n_passes = int(n_passes_slider.val)
-        n_circles = int(n_circles_slider.val)
+        active_cycles = cfg.n_circular_cycles
         rotations = [0, 90, 0]
 
         for i in range(3):
             if i < active_cycles:
-                pts_full = _build_circular_with_params(rotations[i], radius, n_passes, n_circles)
+                pts_full = circular_cycle(rotation_deg=rotations[i])
                 pts_resampled = _resample_points(pts_full, n_points)
                 cycle_lines[i].set_visible(True)
                 current_circular_pts[i] = pts_resampled
@@ -299,6 +314,20 @@ def plot_static(cycles: list[dict]) -> Any:
     btn_export.label.set_color('white')
     btn_export.label.set_fontsize(8)
 
+    ax_btn_params = fig.add_axes([0.82, 0.015, 0.16, 0.04])
+    btn_params = Button(ax_btn_params, 'Paramètres', color='#0f3460', hovercolor='#16213e')
+    btn_params.label.set_color('white')
+    btn_params.label.set_fontsize(8)
+
+    # Nom du fichier de sortie, pour produire des variantes d'essai sans
+    # toucher au fichier de reference (plan, section 6.5).
+    ax_stem = fig.add_axes([0.04, 0.058, 0.28, 0.032], facecolor='#0f3460')
+    stem_box = TextBox(ax_stem, 'Sortie ', initial='etalement',
+                       color='#0f3460', hovercolor='#16213e')
+    stem_box.label.set_color('white')
+    stem_box.label.set_fontsize(8)
+    stem_box.text_disp.set_color('white')
+
     def toggle_wp(event):
         new_vis = not waypoint_scatters[0].get_visible()
         for sc in waypoint_scatters:
@@ -310,7 +339,7 @@ def plot_static(cycles: list[dict]) -> Any:
         btn_shape.label.set_text('Tri/Rect: Tri' if linear_mode['triangular'] else 'Tri/Rect: Rect')
         _update_linear_cycles_shape()
 
-    def export_current_urscript(event):
+    def _collect_export_cycles():
         active_cycles = min(3, max(0, int(round(n_cycles_slider.val))))
         export_cycles = []
         for i in range(active_cycles):
@@ -336,20 +365,60 @@ def plot_static(cycles: list[dict]) -> Any:
                 'type': 'linear',
                 'waypoint_indices': wp_lin,
             })
+        return export_cycles
+
+    def _script_path_for_stem() -> Any:
+        stem = (stem_box.text or 'etalement').strip() or 'etalement'
+        return P.REPO_ROOT / f'{stem}.script'
+
+    def export_current_urscript(event):
+        _push_sliders_to_settings()
+        export_cycles = _collect_export_cycles()
         if not export_cycles:
             print('[EXPORT] Aucun cycle à exporter.')
             return
-        generate_urscript(export_cycles, filename=P.SCRIPT_PATH)
-        print(f"[EXPORT] URScript généré depuis l'UI ({len(export_cycles)} cycles) -> {P.SCRIPT_PATH}")
+        target = _script_path_for_stem()
+        if generate_urscript(export_cycles, filename=target):
+            print(f"[EXPORT] URScript généré depuis l'UI "
+                  f"({len(export_cycles)} cycles) -> {target}")
+
+    def open_params(event):
+        # Import tardif : la fenetre de reglages est optionnelle, et Tk peut
+        # etre absent d'un poste qui ne fait que de l'export headless.
+        try:
+            from design.ui_settings import open_settings_window
+        except ImportError as exc:
+            print(f"[PARAMS] Fenêtre de réglages indisponible : {exc}")
+            return
+
+        def _on_apply(_settings):
+            r_circle_slider.set_val(float(_settings.circ_r_circle))
+            n_cycles_slider.set_val(int(_settings.n_circular_cycles))
+            n_passes_slider.set_val(int(_settings.circ_n_passes))
+            n_circles_slider.set_val(int(_settings.circ_n_circles))
+            if _settings.ui_discretization_points:
+                pts_slider.set_val(int(_settings.ui_discretization_points))
+            update_discretization(None)
+            _update_linear_cycles_shape()
+
+        def _on_export(_settings, stem):
+            stem_box.set_val(stem or 'etalement')
+            export_current_urscript(None)
+
+        open_settings_window(settings=get_settings(), on_apply=_on_apply,
+                             on_export=_on_export)
 
     btn.on_clicked(toggle_wp)
     btn_shape.on_clicked(toggle_shape_mode)
     btn_export.on_clicked(export_current_urscript)
+    btn_params.on_clicked(open_params)
 
     # Références persistantes pour éviter la désactivation des boutons
     fig._toggle_btn = btn
     fig._shape_btn = btn_shape
     fig._export_btn = btn_export
+    fig._params_btn = btn_params
+    fig._stem_box = stem_box
     fig._pts_slider = pts_slider
     fig._r_circle_slider = r_circle_slider
     fig._n_cycles_slider = n_cycles_slider
@@ -380,9 +449,11 @@ def plot_static(cycles: list[dict]) -> Any:
         fig.subplots_adjust(left=0.06, right=0.98, top=0.93, bottom=0.10,
                             wspace=0.22, hspace=0.62)
         button_y, button_h = 0.005, 0.045
-        ax_btn_shape.set_position([0.04, button_y, 0.28, button_h])
-        ax_btn.set_position([0.36, button_y, 0.28, button_h])
-        ax_btn_export.set_position([0.68, button_y, 0.28, button_h])
+        ax_btn_shape.set_position([0.04, button_y, 0.21, button_h])
+        ax_btn.set_position([0.27, button_y, 0.21, button_h])
+        ax_btn_export.set_position([0.50, button_y, 0.23, button_h])
+        ax_btn_params.set_position([0.75, button_y, 0.21, button_h])
+        ax_stem.set_position([0.10, button_y + button_h + 0.008, 0.20, 0.030])
         bottom_row_y, bottom_row_h = 0.07, 0.22
         for ax in axes[1, :]:
             pos = ax.get_position()
@@ -419,16 +490,23 @@ def main() -> int:
     parser.add_argument('--export', action='store_true', help='Exporter le URScript (.script)')
     parser.add_argument('--export-urp', action='store_true', help='Exporter le programme PolyScope (.urp)')
     parser.add_argument('--no-show', action='store_true', help='Ne pas afficher les graphiques')
+    parser.add_argument('--force', action='store_true',
+                        help='Ecraser un fichier de sortie retouche a la main')
     args = parser.parse_args()
+
+    # Bannière des réglages actifs : d'où ils viennent et en quoi ils
+    # s'écartent des défauts. Silencieuse quand rien n'est surchargé.
+    for line in startup_banner(get_settings()):
+        print(line)
 
     cycles = build_full_trajectory()
     exit_code = 0
 
     if args.export:
-        if not generate_urscript(cycles):
+        if not generate_urscript(cycles, force=args.force):
             exit_code = 1
     if args.export_urp:
-        if not generate_urp(cycles):
+        if not generate_urp(cycles, force=args.force):
             exit_code = 1
 
     if not args.no_show:

@@ -71,12 +71,16 @@ flowchart LR
 
 | Module | Responsibility |
 |---|---|
-| `params.py` | Single source of truth for every protocol constant (surface, heights, cycle tuning, force targets, probe parameters, TCP speed cap). `ur5_sim/config.py` imports the shared subset from here; never redefine a constant downstream. |
-| `geometry.py` | SE(3) primitives and the `plate_to_robot()` / `_abs_pose()` frame conversions. |
-| `trajectory.py` | Cycle generators (`circular_cycle`, `linear_cycle`, `triangular_cycle`) in the plate frame (mm). |
-| `export.py` | Emits `etalement.script` and `etalement.urp`. Owns the CB3 constraints, the PolyScope memory budget check, and the TCP speed clamp. The program never actuates the 2F-85 (passive finger support: no `rq_*`, no `set_payload`, no tool RS485). |
+| `params.py` | Hard-coded protocol defaults, versioned, never written by the UI. `design/settings.py` reads each field's default from here; `ur5_sim/config.py` imports the shared subset, never redefines a constant downstream. |
+| `settings.py` | `Settings` dataclass: the effective values read at runtime by the exporter, the UI, and the simulator. Loads overrides from `etalement_settings.json` (`from_file`), writes only the fields that differ from `params.py` (`to_overrides`, `save`), resets to defaults (`reset`), validates bounds and TCP-speed clamps (`validate`, `clamps`, `clamped`), flags physically dubious combinations (`warnings`), and exposes the process-wide singleton (`get_settings`, `reload_settings`, `set_settings`) plus `startup_banner()` for the CLI. |
+| `settings_spec.py` | One `FieldSpec` per exposed setting: label, unit, bounds, tab group, and the three flags that decide editability - `editable` (hard read-only, e.g. controller limits), `locked` (needs the Calibration unlock), `enabled` (grayed out, e.g. the parked `plane3` fields). `settings.py` and the UI both read `SPECS` instead of repeating per-field code. |
+| `geometry.py` | SE(3) primitives and the `plate_to_robot()` / `_abs_pose()` frame conversions; reads calibration fields through `get_settings()` at call time rather than importing them by value. |
+| `trajectory.py` | Cycle generators (`circular_cycle`, `linear_cycle`, `triangular_cycle`) in the plate frame (mm); also read through `get_settings()` at call time. |
+| `export.py` | Emits `etalement.script` and `etalement.urp`, reading `Settings` at call time in `_build_urscript_lines()` instead of importing constants by value; prepends a `# === REGLAGES UTILISES ===` traceability block only when at least one field differs from the `params.py` defaults, so a nominal export stays byte-identical to the reference. Owns the CB3 constraints, the PolyScope memory budget check, and the TCP speed clamp. `generate_urscript()` / `generate_urp()` take a `settings=` override and a `force=` flag: `check_overwrite()` compares the output file's digest against `.etalement_export_state.json` (the record of the last export) and refuses to overwrite a hand-edited file unless `force=True`. The program never actuates the 2F-85 (passive finger support: no `rq_*`, no `set_payload`, no tool RS485). |
+| `ui_settings.py` | `open_settings_window()` and the `SettingsWindow` Toplevel: five `ttk.Notebook` tabs generated from `settings_spec.SPECS`. Tolerant of a Tk-less environment - returns `None` and prints a message, never raises. |
+| `ui_widgets.py` | Widget construction, text/value conversion, and the body of `apply()` / `reset()` / `save()` / `export()`, kept out of `ui_settings.py` so both files stay under the 4096-token ceiling (`.claude/rules/code-style.md`). |
 | `live_ipc.py` | Non-blocking UDP receiver drained on each matplotlib timer tick; converts world-m poses back to plate-mm via the inverse of `plate_to_robot()` and draws the live TCP star + trail on the matching cycle subplot. |
-| `app.py` | matplotlib UI, widget wiring, `main()` entry point (`--export`, `--export-urp`, `--no-show`). |
+| `app.py` | matplotlib UI, widget wiring, `main()` entry point (`--export`, `--export-urp`, `--no-show`, `--force`). The discretization and cycle-shape sliders are views onto `Settings` rather than separate state; the Paramètres button opens `ui_settings.open_settings_window()`. |
 
 ### `ur5_sim/` — validation and replay
 
@@ -84,11 +88,11 @@ flowchart LR
 |---|---|
 | `parsing/urscript.py` | Lenient regex reader. `parse_poses()` returns 4-tuples `(lineno, pose, cycle_idx, in_contact)`; handles three emit formats (`movel(T(p[...]))` legacy, `movel(apply_correction(p[...], dx, dy))` current, plain `movel(p[...])`). `force_mode` / `end_force_mode` toggle `in_contact` inside each `def cycle_N():`. Also parses probe blocks, `NHAT`, the nominal frame, and `global <NAME> = <speed>` preamble declarations. |
 | `kinematics/` | `transforms.rotate_translation_y` is the only implementation of the `SIM_TRAJ_ROT_Y_RAD` remap (currently 0.0 since `P_REF` has identity orientation). `ik.run_ik` (sequential IK on link `tool0`), `ik_multisolve` (branch enumeration), `motion.densify_segments`. |
-| `visualization/` | `surface.py` (plate geometry + force surrogate), `viewer.py` (Swift scene + matplotlib panels + UDP frame emit), `interactions.py` (widget callbacks), `swift_scene.py`, `mpl_display.py`. |
+| `visualization/` | `surface.py` (plate geometry + force surrogate, reads calibration and force fields through `get_settings()` at call time rather than at import), `viewer.py` (Swift scene + matplotlib panels + UDP frame emit), `interactions.py` (widget callbacks), `swift_scene.py`, `mpl_display.py`. |
 | `meshes/` | FT-300 + 2F-85 + `Support doigt.stl` pipeline for Swift: decimation, color extraction, link loader. |
 | `reporting/text_report.py` | Prints surface events first (`SURFACE_DEVIATION` / `SURFACE_CLAMP`), then IK / joint-limit failures. |
-| `cli.py` | Argparse entry (`--check`, `--visualize`, `--identity`); anchors `P_ANCHOR_OLD` / `P_REF`, applies the surface constraint pre-IK, filters expected recontact deviations (section 5), checks TCP speed globals against `URSCRIPT_MAX_TCP_SPEED_MPS`. |
-| `config.py` | Paths, anchors, sim DT/speed, surface constants, mesh decimation targets. Shared constants are imported from `design.params`, not duplicated. |
+| `cli.py` | Argparse entry (`--check`, `--visualize`, `--identity`); prints `config.settings_summary()` at the head of every report (source, read timestamp, overrides) before anchoring `P_ANCHOR_OLD` / `P_REF`, applying the surface constraint pre-IK, filtering expected recontact deviations (section 5), and checking TCP speed globals against `URSCRIPT_MAX_TCP_SPEED_MPS`. |
+| `config.py` | Paths, anchors, sim DT/speed, surface constants, mesh decimation targets. Reads `etalement_settings.json` through `design.settings.get_settings()` once at import - the same file the UI writes - and falls back to `design/params.py` defaults when it is absent; `settings_summary()` reports the source and the read time, since a run in progress while the operator saves new settings still validates against the old ones. Shared constants otherwise imported from `design.params`, not duplicated. |
 | `ipc_config.py` | UDP host/port/payload constants shared by writer (viewer) and reader (design UI). |
 | `probe.py` | 3-point probe simulation. **Parked** (see section 6). |
 
@@ -176,7 +180,26 @@ frame matters).
   `trail_anchor_m`. Emitted but not yet consumed: `in_contact`, `force_z_n`,
   `surface_depth_mm` - a ready-made hook for a live force/contact HUD in the design UI.
 
-## 8. Dependency invariants (do not relax)
+## 8. Invariants (do not relax)
+
+### Settings layer
+
+Never `from design.params import X` in a module that must see the operator's overrides.
+In Python, `from X import Y` binds the value at import time; a later change to
+`design.params.Y`, or to the same field through `etalement_settings.json`, has no effect
+on the name already bound in the importing module. The correct form is
+`s = get_settings()` followed by `s.<field>` at the point of use, so the read happens
+after the current process's settings have been loaded. `design/export.py`,
+`design/geometry.py`, `design/trajectory.py`, `design/live_ipc.py`, `ur5_sim/config.py`,
+and `ur5_sim/visualization/surface.py` all follow this pattern.
+
+Two categories of constant are exempt and may stay imported by value: paths
+(`SCRIPT_PATH`, `URP_PATH`, both derived from `REPO_ROOT`) and constants that are not
+exposed in `design/settings_spec.SPECS` at all (`Z_CONTACT`, `LIN_N_PASSES`,
+`LIN_N_POINTS_PER_SEGMENT`, `N_LINEAR_CYCLES`, `TCP_X`, `TCP_Y`) - there is no operator
+override for the read-at-call-time rule to protect.
+
+### Dependencies
 
 - `swift-sim==1.1.0` needs `websockets<13`; keep this project's `.venv` isolated from
   the global env (Anthropic/Google SDKs need `websockets>=13`).
@@ -208,6 +231,15 @@ python -m unittest discover -s tests -p "test_*.py"
 | `test_force_target_filter.py` | recontact-depth deviation filtering (section 5) |
 | `test_udp_ipc.py` | UDP frame round-trip (section 7) |
 | `test_probe_sim.py` | parked with the 3-point probe (section 6) |
+| `test_settings.py` | `Settings.to_overrides` / `from_file` / `save` round-trip, each dataclass default equal to its `design/params.py` constant, and out-of-bounds values rejected with the TCP-speed clamps applied and reported |
+| `test_export_settings.py` | `_build_urscript_lines()` at default settings matches `tests/fixtures/golden_headless.script` byte for byte (the traceability block stripped for the comparison, since its date and fingerprint vary by construction), and a changed `Settings` field actually changes the generated script |
+| `test_sim_reads_settings.py` | `ur5_sim/config.py` reflects `etalement_settings.json` when present, falls back to `design/params.py` defaults otherwise |
+| `test_settings_persistence.py` | `etalement_settings.example.json` is valid JSON whose overrides name real `SPECS` fields and pass `validate()`; `startup_banner()` is empty at defaults and reports overrides plus the TCP-speed clamp; `etalement_settings.json` is `.gitignore`d |
+| `test_ui_settings.py` | Settings-window value capture on an unmapped Tk root, no Playwright and no visible window (section 5.1 of `plan_variables_UI.md`): a valid edit propagates, an out-of-bounds edit is rejected with no field applied, the displayed default matches `design/params.py`, Réinitialiser restores defaults, and read-only or calibration-locked fields refuse edits |
+
+`tests/fixtures/golden_headless.script` is the headless `_build_urscript_lines()` output
+captured before the settings layer existed, kept as the byte-for-byte identity witness for
+`test_export_settings.py`.
 
 No CI: run the suite locally before any change touching parsing, transforms, export, or
 the surface module.
@@ -215,10 +247,30 @@ the surface module.
 ## 10. Rules for the next improvement
 
 1. New constants go in `design/params.py`; `ur5_sim/config.py` imports, never redefines.
+   A constant exposed to the operator also gets a `FieldSpec` in
+   `design/settings_spec.SPECS` and a matching field in `design/settings.Settings`.
 2. New geometry travels the full frame chain of section 3 - no shortcuts.
 3. Anything emitted into `etalement.script` must respect the CB3 constraints of
    section 4 and get a corresponding parser + replay in `ur5_sim` so `--check` stays a
    faithful pre-flight of the real run.
 4. Prefer extending the UDP frame (section 7) over reintroducing file IPC.
-5. The parked 3-point probe is the designated rework: correct plane estimation
-   (height + tilt), then re-enable `SIM_PROBE_ENABLE` and `test_probe_sim.py`.
+5. Never `from design.params import X` in a module that must see operator overrides
+   (section 8).
+
+What remains open, in no particular priority order:
+
+- The versioned `etalement.script` / `etalement.urp` were generated from the UI export
+  path before the settings layer landed and have not been regenerated against it;
+  `circular_waypoint_mode` now makes the subsample-vs-all waypoint-density divergence
+  explicit but does not resolve it.
+- `URSCRIPT_BLEND_CONTACT` does not exist yet - it belongs to
+  `plan_optimisation_urscript.md`, section 5 - so it is not exposed in `SPECS`.
+- The parked 3-point probe rework (section 6): correct plane estimation (height and
+  tilt), then re-enable `SIM_PROBE_ENABLE` and `test_probe_sim.py`. The `plane3` choice
+  is listed in the settings UI but refused by `Settings.validate()`.
+- Exposing the Z force as a URScript global editable from the pendant
+  (`plan_optimisation_urscript.md`, section 5); today it stays inlined in the
+  `force_mode(...)` wrench.
+- The settings window's visual rendering is checked by eye by the operator; it is not
+  automated (section 5.1 of `plan_variables_UI.md` explains why Playwright was ruled
+  out for this window).

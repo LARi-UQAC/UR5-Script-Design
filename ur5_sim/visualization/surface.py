@@ -26,13 +26,8 @@ import numpy as np
 from spatialmath import SE3
 
 from design.geometry import _abs_pose, plate_to_robot
-from design.params import (
-    PROBE_POINTS_PLATE_MM,
-    ROBOT_RX, ROBOT_RY, ROBOT_RZ,
-    ROBOT_Z_SURFACE,
-    SURFACE_W, SURFACE_H,
-    Z_CONTACT, Z_TRANSIT,
-)
+from design.params import Z_CONTACT
+from design.settings import get_settings
 from ur5_sim.config import (
     SIM_TRAJ_ROT_Y_RAD,
     SURFACE_COLOR_RGBA,
@@ -67,10 +62,11 @@ def _plate_corner_world(
        world Y so the playback aligns with the design-UI subplots.
     """
     px_m, py_m = plate_to_robot(corner_mm[0], corner_mm[1])
-    pz_m = ROBOT_Z_SURFACE + z_mm / 1000.0
+    s = get_settings()
+    pz_m = s.robot_z_surface + z_mm / 1000.0
     pose_raw = [
         px_m, py_m, pz_m,
-        ROBOT_RX, ROBOT_RY, ROBOT_RZ,
+        s.robot_rx, s.robot_ry, s.robot_rz,
     ]
     # Etape 2 : pre-bake URScript (sortie en repere absolu).
     abs_pose = _abs_pose(pose_raw)
@@ -95,8 +91,9 @@ def compute_surface_frame(p_anchor_old: SE3, p_ref: SE3) -> dict:
         the positive side ; the kinematic clamp and snap rely on this
         convention.
     """
-    w_mm = float(SURFACE_W)
-    h_mm = float(SURFACE_H)
+    cfg = get_settings()
+    w_mm = float(cfg.surface_w)
+    h_mm = float(cfg.surface_h)
 
     # Coins en repere plaque (z = Z_CONTACT = 0 mm) :
     # ordre c0=(0,0), c1=(W,0), c2=(W,H), c3=(0,H).
@@ -121,7 +118,7 @@ def compute_surface_frame(p_anchor_old: SE3, p_ref: SE3) -> dict:
     # Z_TRANSIT mm au-dessus du plan dans le repere plaque doit avoir
     # un produit scalaire positif avec ``normal``.
     transit_world = _plate_corner_world(
-        (w_mm / 2.0, h_mm / 2.0), Z_TRANSIT,
+        (w_mm / 2.0, h_mm / 2.0), cfg.z_transit,
         p_anchor_old, p_ref,
     )
     if float(np.dot(normal, transit_world - center)) < 0.0:
@@ -318,12 +315,12 @@ def compute_probe_points_world(
     Returns ``[world_xyz, ...]`` in the same frame as
     :func:`compute_test_points_world`, so the probe markers plot exactly on the
     plate polygon drawn by :func:`make_corners_xy_polygon`. The points are
-    ``design.params.PROBE_POINTS_PLATE_MM`` — the 3 poses the on-robot
+    ``Settings.probe_points_plate_mm`` — the 3 poses the on-robot
     ``probe_surface_plane()`` touches to measure the plate plane and tilt.
     """
     return [
         _plate_corner_world((x_mm, y_mm), Z_CONTACT, p_anchor_old, p_ref)
-        for (x_mm, y_mm) in PROBE_POINTS_PLATE_MM
+        for (x_mm, y_mm) in get_settings().probe_points_plate_mm
     ]
 
 
