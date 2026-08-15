@@ -12,7 +12,10 @@ script).
 Fonctions exportées :
   - generate_urscript()       : écrit etalement.script
   - generate_urp()            : écrit etalement.urp
+  - generate_urscript_acq()   : écrit etalement_acq.script (jumeau acquisition)
+  - generate_urp_acq()        : écrit etalement_acq.urp (jumeau acquisition)
   - _build_urscript_lines()   : construit la liste des lignes URScript
+  - _build_acq_lines()        : enveloppe ces lignes du processus d'acquisition
   - _validate_script_memory() : vérifie le budget mémoire PolyScope
   - _clamp_tcp_speed()        : plafonne à URSCRIPT_MAX_TCP_SPEED
 """
@@ -823,3 +826,89 @@ def generate_urp(cycles: list[dict], filename: Path = URP_PATH,
         return False
     print(f'URP exporté -> {filename}')
     return _validate_script_memory(filename, "URP")
+
+
+def generate_urscript_acq(cycles: list[dict],
+                          filename: Path = params.ACQ_SCRIPT_PATH,
+                          settings: Settings | None = None,
+                          force: bool = False) -> bool:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Genere le jumeau acquisition de generate_urscript() : les memes lignes
+        de mouvement, construites par _build_urscript_lines() sans la moindre
+        modification, puis enveloppees du processus d'acquisition 50 Hz par
+        _build_acq_lines(). Ecrit par le meme _write_export() que l'original :
+        le garde-fou de retouche a la main et l'empreinte d'etat d'export
+        s'appliquent donc identiquement au fichier _acq.
+
+    Inputs:
+        cycles (list[dict]): cycles de trajectoire (memes que generate_urscript).
+        filename (Path): fichier de sortie, ACQ_SCRIPT_PATH par defaut.
+        settings (Settings | None): reglages effectifs ; None -> get_settings().
+        force (bool): outrepasse le garde-fou de retouche a la main.
+
+    Outputs:
+        ok (bool): False si retouche a la main (sauf force=True) ou si le
+        budget memoire PolyScope est depasse ; True sinon.
+    --------------------------------------------------------------------------
+    """
+    base_lines = _build_urscript_lines(cycles, settings)
+    lines = _build_acq_lines(base_lines)
+    filename = Path(filename)
+    if not _write_export(filename, '\n'.join(lines), "URScript ACQ", force):
+        return False
+    print(f'URScript ACQ exporté -> {filename}  ({len(lines)} lignes)')
+    return _validate_script_memory(filename, "URScript ACQ")
+
+
+def generate_urp_acq(cycles: list[dict],
+                     filename: Path = params.ACQ_URP_PATH,
+                     settings: Settings | None = None,
+                     force: bool = False) -> bool:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Genere le jumeau acquisition de generate_urp() : meme assemblage XML
+        PolyScope que generate_urp() (non touche, voir sa docstring pour le
+        garde-fou d'ecrasement), mais avec le contenu <script> produit par
+        _build_acq_lines(_build_urscript_lines(...)) au lieu de
+        _build_urscript_lines() seul.
+
+    Inputs:
+        cycles (list[dict]): cycles de trajectoire (memes que generate_urp).
+        filename (Path): fichier de sortie, ACQ_URP_PATH par defaut.
+        settings (Settings | None): reglages effectifs ; None -> get_settings().
+        force (bool): outrepasse le garde-fou de retouche a la main.
+
+    Outputs:
+        ok (bool): False si retouche a la main (sauf force=True) ou si le
+        budget memoire PolyScope est depasse ; True sinon.
+    --------------------------------------------------------------------------
+    """
+    import xml.etree.ElementTree as ET
+    from xml.dom import minidom
+
+    base_lines = _build_urscript_lines(cycles, settings)
+    script_content = '\n'.join(_build_acq_lines(base_lines))
+
+    root = ET.Element('program')
+    root.set('version', '6.0')
+    robot = ET.SubElement(root, 'robot')
+    robot.set('speed', '100')
+    robot.set('acceleration', '100')
+    script_node = ET.SubElement(robot, 'script')
+    script_node.text = script_content
+
+    xml_str = minidom.parseString(ET.tostring(root, encoding='unicode')) \
+                     .toprettyxml(indent='  ', encoding=None)
+    xml_lines = xml_str.split('\n')
+    if xml_lines[0].startswith('<?xml'):
+        xml_lines = xml_lines[1:]
+    xml_out = '\n'.join(xml_lines)
+
+    filename = Path(filename)
+    if not _write_export(filename, xml_out, "URP ACQ", force):
+        return False
+    print(f'URP ACQ exporté -> {filename}')
+    return _validate_script_memory(filename, "URP ACQ")
