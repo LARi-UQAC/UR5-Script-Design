@@ -47,6 +47,10 @@ python -m unittest discover -s tests -p "test_*.py"
 python -m unittest tests.test_surface_constraint -v   # single module
 python -m unittest tests.test_surface_constraint.SurfaceFrameTests.test_snap_projects_pose_onto_plane
 
+# RTDE fallback monitor (C, not collected by unittest discovery) - needs MinGW-w64 gcc
+datalogger\tests\build_and_run_tests.bat
+datalogger\build.bat                       # produce rtde_fallback_monitor.exe
+
 # Dependency audit (CLAUDE rule from parent dir)
 pip-audit -r requirements.txt
 ```
@@ -135,6 +139,8 @@ Stdlib `unittest`, no `conftest.py`, no pytest plugins. Tests live in `tests/`:
 - `test_force_target_filter.py` covers the recontact-depth deviation filter.
 - `test_udp_ipc.py` covers the UDP frame round-trip.
 - `test_probe_sim.py` is parked with the disabled 3-point probe (see ARCHITECTURE.md, section 6).
+
+**C-language exception.** `datalogger/` holds the RTDE fallback monitor, a standalone tool for a lab computer that has no Python and where nothing can be installed (isolated VLAN, no internet), so both the tool and its tests are C. `datalogger/tests/test_rtde_fallback_monitor.c` includes the tool's single translation unit with its `main()` compiled out, so it calls the real functions instead of shelling out. It is not collected by `unittest discover`; run `datalogger\tests\build_and_run_tests.bat` (needs MinGW-w64 `gcc` on `PATH`). It covers big-endian decoding against known byte sequences, every ordered `runtime_state` transition pair, the 20 ms decimation grid, the CSV schema, and an integration layer replaying the RTDE handshake from a fake server on loopback. `datalogger/` is fully standalone: it reads and writes nothing belonging to `etalement*.script`, `etalement*.urp`, `ur5_sim` or the design UI.
 
 No CI; run them locally before pushing changes that touch parsing, transforms, export, or the surface module.
 

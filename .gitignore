@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 .vscode/katex/
 *.pptx
+
+# datalogger: build artifacts and captured trials (rebuild with build.bat)
+datalogger/*.exe
+datalogger/tests/*.exe
+datalogger/tests/_tmp_*/
+ACQ_rtde_*.csv

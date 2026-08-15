@@ -48,15 +48,17 @@ key once the run completes). It does not replace or modify `etalement.script` /
 `etalement.urp`; both pairs will keep being generated side by side, and the simulator
 keeps using the plain `etalement.script`.
 
-A second, fully independent fallback tool is planned in its own plan and issue
-(tracked in [issue #7](https://github.com/LARi-UQAC/UR5-Script-Design/issues/7), full
-design in
+A second, fully independent fallback tool is **implemented** in
+[datalogger/](datalogger/) (issue
+[#7](https://github.com/LARi-UQAC/UR5-Script-Design/issues/7), design in
 [docs/superpower/plans/plan_rtde_fallback_monitor.md](docs/superpower/plans/plan_rtde_fallback_monitor.md)):
-a standalone C executable, statically compiled, run from `cmd.exe` on a lab computer
-wired to the same isolated VLAN. It passively reads the robot's RTDE stream and writes
-its own CSV with automatic per-run file boundaries (no Python, no PowerShell, no
-install of any kind on that machine). Neither the main path nor this fallback depends
-on the other.
+`rtde_fallback_monitor.exe`, a standalone statically compiled C executable run from
+`cmd.exe` on a lab computer wired to the same isolated VLAN. It passively reads the
+robot's RTDE stream and writes its own CSV with automatic per-run file boundaries, driven
+by the `runtime_state` field carried in that same stream (no Python, no PowerShell, no
+install of any kind on that machine). It is read-only toward the robot. Neither the main
+path nor this fallback depends on the other; build and deployment procedure in
+[datalogger/README.md](datalogger/README.md).
 
 ## Dependencies
 
@@ -116,6 +118,16 @@ Stdlib `unittest`, no pytest:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
+```
+
+One exception, in C: the RTDE fallback monitor in [datalogger/](datalogger/) is a C tool,
+because the lab computer it runs on has no Python and nothing can be installed there. Its
+tests are C as well, so they call the tool's own functions directly instead of shelling
+out, and they are not collected by the discovery above. Run them with MinGW-w64 `gcc` on
+`PATH`:
+
+```bash
+datalogger\tests\build_and_run_tests.bat
 ```
 
 ## Where to go next
