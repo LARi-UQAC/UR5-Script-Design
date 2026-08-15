@@ -382,10 +382,16 @@ Ownership and complexity are set in §0-bis; this is the sequence.
    flipped to `Implemented`, Sonnet) and D2 (`ARCHITECTURE.md` and root `CLAUDE.md`, Opus).
 5. **Wave 5, V1, Opus only, nothing delegated**:
    - `python -m unittest discover -s tests -p "test_*.py"` - full suite green.
-   - `python ur5_etalementv6.py --export --no-show`, then confirm `etalement.script` is
-     **byte-identical** to the committed one (`git diff --stat` must show no change to it),
-     with `etalement_acq.script` appearing alongside. `--export-urp` is **not** run without
-     asking the operator first: `etalement.urp` is hand-edited between robot trials.
+   - `python ur5_etalementv6.py --export --no-show`, then confirm the output is
+     **byte-identical to `tests/fixtures/golden_headless.script`**, with
+     `etalement_acq.script` appearing alongside. The reference is the golden fixture, **not**
+     the committed `etalement.script`: measured 2026-08-15, a headless export reproduces the
+     fixture exactly (61 366 characters, 502 lines) while the committed artifact is a
+     different one (817 lines, 113 131 bytes) produced from the interactive UI with a richer
+     cycle configuration. Comparing against the committed file would fail for a reason that
+     has nothing to do with this plan (see F10 in
+     [`erreur_hors_datalogger.md`](erreur_hors_datalogger.md)). `--export-urp` is **not** run
+     without asking the operator first: `etalement.urp` is hand-edited between robot trials.
    - `python -m ur5_sim --check` against `etalement.script` - unchanged behavior (the sim
      never reads the acq file).
    - Offline end-to-end: start the daemon, run `acq_emulator.py --ft` and

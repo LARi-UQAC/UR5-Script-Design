@@ -371,6 +371,50 @@ twice.
 
 ---
 
+## F10. The committed `etalement.script` cannot be reproduced by any documented command (Medium)
+
+**Where.** `etalement.script` at the repo root, tracked, 817 lines and 113 131 bytes.
+`python ur5_etalementv6.py --export --no-show` produces 502 lines and 61 366 characters
+instead, and that output matches `tests/fixtures/golden_headless.script` byte for byte
+(measured 2026-08-15 on commit `acfe0e3`, with no `etalement_settings.json` present, so the
+export ran on pure `design/params.py` defaults).
+
+**Consequence.** The artifact the operator loads on the robot is roughly twice the program
+the tool generates today, and nothing in the repository records which inputs produced it.
+The plausible explanation is an export from the interactive UI with a richer cycle
+configuration than the headless defaults, but that is an inference, not a record: the
+traceability header (`_settings_header_lines`, `design/export.py:73`) is emitted only when a
+settings field differs from its `params.py` default, so a UI export that changed the
+per-cycle sliders leaves no trace at all. Three consequences: nobody can regenerate the file
+that ran a given trial, nobody can tell whether the committed script and the current code
+still agree on the protocol, and any test written as "regenerate and compare to
+`etalement.script`" fails for a reason unrelated to the change under test. This was hit while
+writing the acquisition plan's verification step, now pinned to the golden fixture instead.
+
+**Why out of scope.** The acquisition plan adds a second output pair and must leave the first
+untouched; deciding what the committed artifact should be is a protocol question for the
+operator, not a side effect of adding a logger.
+
+**Proposed correction.** Decide, then record. Either the committed `etalement.script` is the
+trial-of-record, and the cycle configuration that produced it is captured beside it so a
+command regenerates it, or it is stale and is regenerated from current defaults and committed
+as such. Either way the emitted header should carry the cycle configuration, not only the
+settings overrides, so the file states what produced it. Interacts with F2 and F9: any
+regeneration also rewrites the line endings, so do it in one deliberate commit.
+
+**Potential tests** (`tests/test_export_reproducibility.py`):
+
+1. A headless export equals `tests/fixtures/golden_headless.script` byte for byte (passes
+   today; pins the current baseline).
+2. After the decision above: regenerating the committed artifact from its recorded
+   configuration reproduces it byte for byte, the test naming the configuration source.
+3. The emitted header of any export names enough to reproduce it: cycle count, per-cycle type
+   and waypoint counts, plus the settings fingerprint.
+4. Guard: a test comparing an export against the wrong one of the two references fails with a
+   message that says which is which, so the confusion cannot recur silently.
+
+---
+
 ## Execution note
 
 Same split as [`plan_acq_datalogger.md`](plan_acq_datalogger.md) §0-bis: the corrections
