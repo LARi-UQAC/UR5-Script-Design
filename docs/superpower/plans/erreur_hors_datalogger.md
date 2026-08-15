@@ -283,6 +283,94 @@ frame rather than frame 0; a pause does not split the monitor's CSV file.
 
 ---
 
+## F8. The CSV provenance line hardcodes one machine's address, and a test pins it (Medium)
+
+**Audit basis.** Found while implementing `datalogger/rtde_fallback_monitor.c` on branch
+`feat/rtde-emulator`. The coverage table above lists that file as unaudited on the grounds
+that 147 checks already cover it; those checks are the very thing that pins this defect in
+place.
+
+**Where.** `datalogger/rtde_fallback_monitor.c:245`, inside `format_csv_header`, emits the
+literal `# Data Source: RTDE fallback monitor (192.168.4.14)`. The address is a string
+constant; nothing reads it from the machine. `datalogger/tests/test_rtde_fallback_monitor.c`
+(`test_csv_header_carries_the_schema_and_provenance`) asserts that exact line.
+
+**Consequence.** The line names the lab computer whatever machine actually wrote the file.
+Run the executable anywhere else - a spare laptop during commissioning, a developer machine,
+the emulator rig of [`plan_rtde_emulator.md`](plan_rtde_emulator.md) - and every CSV still
+claims it came from `192.168.4.14`. For a dataset whose provenance is the point, a
+provenance field that is a constant is worse than none: it reads as authoritative and cannot
+be falsified from the file alone. Worse, the neighbouring `# Robot RTDE Endpoint:` line *is*
+derived from `argv`, so the two can disagree, and the wrong one is the one labelled "Data
+Source". The test asserting the literal makes the incorrect value the specified behavior, so
+a future correction fails the suite and reads as a regression.
+
+**Why out of scope.** `plan_rtde_emulator.md` Task 9 adds a simulated-source marker driven
+by the endpoint address, which separates emulator from robot but says nothing about *which
+machine recorded the file*; the two are independent. Changing this line changes every CSV
+header and the C test that pins it, which is a deliberate change to a shipped, tested tool.
+
+**Proposed correction.** Derive both halves at runtime: `gethostname()` for the name, and
+`getsockname()` on the connected socket for the address actually used to reach the robot,
+which is the right one on a multi-homed machine where a hardcoded guess is wrong by
+construction. Emit for example
+`# Data Source: RTDE fallback monitor on LABPC-03 (192.168.4.14)`. Fall back to the hostname
+alone if the address cannot be read, never to a literal. Update the test to assert the
+*shape* and the agreement with the socket, not a fixed address.
+
+**Potential tests** (extend `datalogger/tests/test_rtde_fallback_monitor.c`):
+
+1. The header carries the running host's name as reported by `gethostname()`.
+2. The address in the header equals the local address of the live socket, obtained through
+   the existing loopback fake server, rather than any constant.
+3. Against a fake server reached on a second local address, the header follows the socket
+   and not the first one.
+4. `getsockname()` failure degrades to hostname only: exactly one `Data Source` line, no
+   crash, no empty parentheses.
+5. Non-regression: `Data Source` and `Robot RTDE Endpoint` are never the same field and
+   never contradict each other; the first is local, the second is the peer.
+
+---
+
+## F9. No `.gitattributes`, so line endings are decided per workstation (Low)
+
+**Audit basis.** Observed on every commit made from branch `feat/rtde-emulator`: git prints
+`warning: LF will be replaced by CRLF the next time Git touches it` for each new text file.
+
+**Where.** Repo root; the file is absent. Nothing in the repository states an end-of-line
+policy, so each contributor's `core.autocrlf` decides.
+
+**Consequence.** Three, in decreasing severity. The exported `.script` is loaded by a Linux
+controller, and F2 above already measures 817 CRLF pairs in the current `etalement.script`,
+so the newline question is not theoretical here. `datalogger/*.bat` *needs* CRLF to be safe
+under `cmd.exe`, while the C sources and the Python modules do not, and nothing today
+distinguishes them. And two workstations configured differently produce whole-file diffs on
+anything either one touches, which buries real changes in noise. This entry is the
+repo-wide half of F2: F2 fixes one writer (`design/export.py`), this fixes what git stores
+for everything else, including the C sources and the modules
+[`plan_rtde_emulator.md`](plan_rtde_emulator.md) is about to add.
+
+**Why out of scope.** No current plan changes how files are stored; F2 changes a single
+export path and would still leave every other file governed by local configuration.
+
+**Proposed correction.** Add `.gitattributes` with `* text=auto eol=lf` as the default,
+`*.bat text eol=crlf`, explicit entries for `*.script` and `*.urp`, and `binary` for `*.stl`
+and `*.pptx`. Land it in its own commit and run `git add --renormalize .` there, because
+normalization rewrites blobs and must not be mixed with a behavior change. Sequence it with
+F2, which rewrites `etalement.script` anyway, so the reference file moves once rather than
+twice.
+
+**Potential tests** (extend `tests/test_repo_hygiene.py` from F5):
+
+1. `.gitattributes` exists and assigns an explicit `eol` to `*.bat`.
+2. `git ls-files --eol` reports `i/lf` for every tracked `.py` and `.c`. Assert on the index
+   side, not the working tree, which legitimately differs per platform.
+3. `git ls-files --eol` reports `i/crlf` for every tracked `.bat`.
+4. No tracked file falls through without an attribute match, so a new extension added later
+   is a deliberate decision rather than a silent default.
+
+---
+
 ## Execution note
 
 Same split as [`plan_acq_datalogger.md`](plan_acq_datalogger.md) §0-bis: the corrections

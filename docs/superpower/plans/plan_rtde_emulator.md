@@ -29,6 +29,27 @@ Two rules that keep the routing honest:
 - **Never downgrade tasks 5, 6 or 7.** Their reasons are stated in their own
   Model lines and are specific, not generic caution.
 
+## Defects found outside this plan
+
+While implementing these tasks you will find faults in existing code that this plan does
+not cover. **Do not fix them here.** Log them in
+[`erreur_hors_datalogger.md`](erreur_hors_datalogger.md) and carry on with the task.
+
+The reason is reviewability: a diff that both adds the emulator and repairs unrelated code
+cannot be judged on either count, and the repair is the half that will be waved through.
+
+- **Read that file's "Writing protocol" section before appending.** More than one session
+  writes to it, neither sees the other's buffer, and a write based on a stale read silently
+  destroys the other session's entries. Re-read immediately before writing, append above
+  `## Execution note`, and never renumber or reword an entry you did not write.
+- Entries already cover several things this plan touches: **F6** (`viewer.py` is 916 lines,
+  over the workspace file ceiling, and Task 6 edits it), **F7** (the dead `paused_sim_t`,
+  which Task 6 puts to use), **F8** (the monitor's hardcoded provenance address, adjacent to
+  Task 9 but independent of it) and **F9** (no `.gitattributes`). Check for an existing
+  entry before writing a new one.
+- If a task in this plan turns out to be underspecified, that is a **plan** defect: report
+  it against this file rather than logging it as a code fault in the register.
+
 ## Global Constraints
 
 - `ur5_sim/rtde_server.py` and `ur5_sim/force_model.py` import **stdlib only**. No matplotlib, no Swift, no spatialmath, no numpy.
