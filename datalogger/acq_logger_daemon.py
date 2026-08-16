@@ -429,8 +429,18 @@ class LogServer(object):
         return SessionResult(path, len(rows), n_bad, self._ft_reader.ok, truncated)
 
     def _reply(self, conn, text):
-        """Send one ASCII reply line, newline-terminated."""
-        conn.sendall((text + "\n").encode("ascii"))
+        """Send one ASCII reply line, newline-terminated.
+
+        Encoded with "replace", never strict. An ERR line carries the operating
+        system's own error text, which is localized: on a French Windows the
+        message for an existing directory is "Impossible de creer un fichier
+        deja existant". Strict ASCII raises UnicodeEncodeError here, inside the
+        server thread, so the one path whose entire purpose is to tell the robot
+        the write failed would itself fail, silently, and the robot would wait
+        for a reply that never comes. A mangled character in a diagnostic is
+        always better than no diagnostic.
+        """
+        conn.sendall((text + "\n").encode("ascii", "replace"))
 
 def _default_out_dir_resolver():
     """Real USB-mount resolver: /proc/mounts, else /tmp with a warning."""
