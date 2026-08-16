@@ -8,8 +8,13 @@ output of the other.
 
 | Path | Where it runs | Output | Status |
 |---|---|---|---|
-| On-robot logger (main) | Robot controller + USB key | `ACQ_log_*.csv` | Planned, see [`plan_acq_datalogger.md`](../docs/superpower/plans/plan_acq_datalogger.md) |
+| On-robot logger (main) | Robot controller + USB key | `ACQ_log_*.csv` | Implemented, in [`../onrobot/`](../onrobot/README.md) - Python, not part of this folder |
 | RTDE fallback monitor | Lab computer, over the network | `ACQ_rtde_*.csv` | Implemented, described below |
+
+**This folder is C only.** It holds one executable, which records what the robot transmits
+on its RTDE port, plus its build script and its C test harness. The on-robot acquisition
+path is Python and lives in [`../onrobot/`](../onrobot/README.md); the two share the seven
+CSV columns and nothing else - no code, no process, no file.
 
 ---
 
