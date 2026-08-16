@@ -96,6 +96,26 @@ flowchart LR
 | `ipc_config.py` | UDP host/port/payload constants shared by writer (viewer) and reader (design UI). |
 | `probe.py` | 3-point probe simulation. **Parked** (see section 6). |
 
+### `datalogger/` — trial data acquisition, two independent paths
+
+Two tools record the same seven columns during a trial. Both are required and neither
+replaces the other; they share no code, no process and no file, so a fault in one cannot
+corrupt the other's output. This folder is the one place in the repository where the
+language is not Python by default: see the invariant in section 8.
+
+| File | Responsibility |
+|---|---|
+| `rtde_fallback_monitor.c` | Fallback path. Standalone C executable running on a lab computer, reading the robot's RTDE stream over the network (port 30004) and writing one `ACQ_rtde_*.csv` per program run. Read-only toward the robot: it opens one outbound connection and never uses the RTDE input path, so it is safe to leave connected during a trial. Its test harness (`tests/`, 147 checks, run through `tests/build_and_run_tests.bat`) includes a fake RTDE server on loopback, so the whole socket path runs with no robot. |
+| `acq_logger_daemon.py` | Main path, on the controller. Loopback TCP server on port 50100 that the `data_logger` thread of `etalement_acq.script` streams samples into, plus an `FTReader` thread merging the Robotiq FT-300 stream from the fixed port 63351. Buffers in RAM for the whole trial (zero USB I/O while the robot moves), then writes `ACQ_log_YYYYMMDD_HHMMSS.csv` to the detected USB mount on `STOP`, fsyncs it, and replies `OK <file> <n>` or `ERR <reason>`. |
+| `urmagic_acqlogger.sh` | UR "magic file": run as root by the controller when the USB key is inserted, it launches the daemon from that same key and returns immediately. |
+| `acq_emulator.py` | Development machine only. Fake FT-300 server plus a fake robot client replaying the real poses of `etalement.script` into the daemon at 50 Hz, so the whole acquisition path runs offline. The acquisition-side mirror of the C fake RTDE server. |
+
+The URScript side is emitted by `design/export.py`: `_build_acq_lines()` wraps the untouched
+output of `_build_urscript_lines()` with the logger thread and the STOP handshake, and
+`generate_urscript_acq()` / `generate_urp_acq()` write the `etalement_acq.*` twins. The
+simulator never reads them; `tests/test_acq_export.py` proves the twin's motion is identical
+to the original's, pose for pose.
+
 ## 3. Coordinate frames — the invariant chain
 
 Three frames are always in play; every pose and every piece of geometry must travel the
@@ -197,7 +217,25 @@ Two categories of constant are exempt and may stay imported by value: paths
 (`SCRIPT_PATH`, `URP_PATH`, both derived from `REPO_ROOT`) and constants that are not
 exposed in `design/settings_spec.SPECS` at all (`Z_CONTACT`, `LIN_N_PASSES`,
 `LIN_N_POINTS_PER_SEGMENT`, `N_LINEAR_CYCLES`, `TCP_X`, `TCP_Y`) - there is no operator
-override for the read-at-call-time rule to protect.
+override for the read-at-call-time rule to protect. The `ACQ_*` constants added for the
+acquisition logger are in that second category on purpose: they are export-time values kept
+out of `SPECS`, so no settings fingerprint and no exported header block moves when they are
+read by value.
+
+### The acquisition daemon depends on nothing
+
+`datalogger/acq_logger_daemon.py` imports the standard library and nothing else - not
+`design`, not `ur5_sim`, not a third-party package. The file is copied **alone** onto a USB
+key and must run there, on the controller's Python 2.7, so it is also kept free of
+f-strings, type hints and `pathlib`, and it stays a plain module with no `__init__.py`
+(tests load it by path with `importlib.util.spec_from_file_location`). It writes its CSV in
+binary mode with explicit `\n`, never text mode, so the bytes a Windows test asserts are the
+bytes the Linux controller produces.
+
+The dependency runs one way only. `datalogger/acq_emulator.py` is a development tool and may
+import `ur5_sim`; the daemon may never be imported by, or import, anything in this
+repository. A future `ur5_sim/force_model.py` (see `plan_rtde_emulator.md`) is allowed to
+replace the emulator's placeholder force source, not the daemon's behaviour.
 
 ### Dependencies
 
