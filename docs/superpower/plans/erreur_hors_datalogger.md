@@ -492,6 +492,64 @@ filesystem, so the check stops depending on the host.
 
 ---
 
+## F13. The acq generators had no validity gate (Medium) - FIXED
+
+**Audit basis.** Reported 2026-08-16 by the agent implementing F1 and F3, outside its own
+scope: the plan's "Required behaviour" for F1 named `generate_urscript()` and
+`generate_urp()` only.
+
+**Where.** `design/export.py`, `generate_urscript_acq()` and `generate_urp_acq()`.
+
+**Consequence.** F1 put a last stop in front of the two original generators, so a settings
+file asking for 200 N could no longer reach `etalement.script`. The acq twins had none, and
+would still have written the same out-of-bounds program into `etalement_acq.script`. That is
+the worse half of the pair to leave open: the acq twin is the one loaded for an instrumented
+trial, so the recorded data would have documented a run that the safety gate was supposed to
+make impossible.
+
+**Correction applied.** The gate is now one function, `_reject_invalid_settings()`, called by
+all four generators before anything is built or opened. `force=` does not override it: force
+concerns the hand-edit guard, never validity. The four generators also now hand the written
+string to `_validate_script_memory()` (see F2), so the memory check and the validity check
+measure the same thing everywhere.
+
+**Tests.** In the F2/F13 suite named below: an invalid `Settings` refuses each of the four
+generators, and no output file is created in any of the four cases.
+
+---
+
+## F14. `csv_open()` can silently overwrite past 99 same-second collisions (Low)
+
+**Audit basis.** Reported 2026-08-16 by the agent implementing F8, in the file that entry
+had it open.
+
+**Where.** `datalogger/rtde_fallback_monitor.c`, the suffix loop inside `csv_open()`:
+`for (suffix = 1; file_exists(w->path) && suffix < 100; suffix++)`.
+
+**Consequence.** The loop stops when `suffix` reaches 100 whether or not the last name it
+built is still taken, so `fopen(w->path, "wb")` then truncates an existing file. It
+contradicts the module's own stated guarantee, repeated in `datalogger/README.md`, that no
+trial can overwrite another. The trigger is extreme (100 collisions inside one wall-clock
+second, or a directory already holding `_1` through `_99` from an earlier session), which is
+why this is Low and not High, but the failure mode is silent data loss and nothing reports
+the exhaustion. Same family as F3: a guard that gives up quietly instead of refusing.
+
+**Proposed correction.** On exhaustion, do not write: report that the suffix space for this
+second is full and let the caller fail, or extend the name with the process id or a
+millisecond field. Never fall through to a name that still exists.
+
+**Potential tests** (C harness, `datalogger/tests/test_rtde_fallback_monitor.c`):
+
+1. Pre-create `ACQ_rtde_<stamp>.csv` and `_1` through `_99` in the output directory, then
+   open a run with that stamp: no existing file is truncated, and the failure or the new
+   naming scheme is visible in the return value.
+2. The ordinary path is unaffected: no collision opens the bare name, one collision opens
+   `_1`, two open `_2`.
+3. A file whose name matches but which is not writable reports the failure rather than
+   claiming success.
+
+---
+
 ## Execution note
 
 Same split as [`plan_acq_datalogger.md`](plan_acq_datalogger.md) §0-bis: the corrections

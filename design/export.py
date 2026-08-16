@@ -54,13 +54,55 @@ def _clamp_tcp_speed(name: str, v_mps: float, cap: float | None = None) -> float
     return v_mps
 
 
-def _validate_script_memory(filename: Path, label: str) -> bool:
+def _reject_invalid_settings(settings: Settings, label: str) -> bool:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Barriere de validite commune aux quatre generateurs (F1,
+        docs/superpower/plans/erreur_hors_datalogger.md). Un export est ce qui
+        atteint le robot : c'est le dernier endroit ou des reglages hors
+        bornes peuvent encore etre arretes. Rien n'est ouvert ni ecrit quand
+        elle se declenche, et force= ne l'outrepasse pas : force ne concerne
+        que le garde-fou de retouche a la main, jamais la validite.
+
+    Inputs:
+        settings (Settings): reglages effectifs de l'export.
+        label (str): etiquette du generateur, pour le message.
+
+    Outputs:
+        rejected (bool): True si l'export doit etre refuse (messages deja
+        imprimes), False si les reglages passent.
+    --------------------------------------------------------------------------
+    """
+    errors = settings.validate()
+    if not errors:
+        return False
+    print(f"ECHEC EXPORT {label}: reglages invalides, export refuse "
+          f"(rien n'est ecrit).")
+    for err in errors:
+        print(f"  WARN: {err}")
+    return True
+
+
+def _validate_script_memory(filename: Path, label: str,
+                            content: str | None = None) -> bool:
     """
     Vérifie que le fichier généré reste dans le budget mémoire PolyScope.
     Retourne False si dépassé, True sinon.
+
+    Mesure les octets que le contrôleur verra, pas ceux que le disque local
+    porte (F2). `Path.stat().st_size` compte les CRLF que le mode texte de
+    Windows ajoute : la référence en portait 817 de plus que sa propre chaîne,
+    donc le même export passait ou échouait selon le système d'exploitation
+    du poste. `content` est la chaîne écrite ; en son absence le fichier est
+    relu en binaire, ce qui donne le même compte depuis que `_write_export`
+    écrit en LF.
     """
     max_bytes = get_settings().urscript_max_bytes
-    size_bytes = filename.stat().st_size
+    if content is not None:
+        size_bytes = len(content.encode('utf-8'))
+    else:
+        size_bytes = len(filename.read_bytes())
     pct = 100.0 * size_bytes / max_bytes
     print(f"Mémoire {label}: {size_bytes} octets / {max_bytes} "
           f"({pct:.1f}% du budget PolyScope)")
@@ -702,17 +744,35 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]
 
 
-def _load_export_state() -> dict[str, str]:
+def _load_export_state() -> tuple[dict[str, str], bool]:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Lit l'etat d'export. Le second element (`ok`) distingue un etat
+        VALIDE mais qui ne connait simplement pas ce fichier (premier export
+        legitime d'un poste neuf : `ok=True`, dict incomplet) d'un etat ABSENT
+        ou CORROMPU (`ok=False`, dict toujours vide) : sans cette distinction,
+        `check_overwrite` ne peut pas dire pourquoi il ne sait rien du
+        fichier vise, et le cas F3 (garde-fou disarme par la disparition du
+        fichier d'etat) resterait silencieux.
+
+    Outputs:
+        state (dict[str, str]): nom de fichier -> empreinte, {} si absent ou
+            illisible.
+        ok (bool): False si le fichier d'etat est absent ou n'a pas pu etre
+            decode ; True s'il a ete lu et parse normalement (meme vide).
+    --------------------------------------------------------------------------
+    """
     if not EXPORT_STATE_PATH.is_file():
-        return {}
+        return {}, False
     try:
-        return json.loads(EXPORT_STATE_PATH.read_text(encoding='utf-8'))
+        return json.loads(EXPORT_STATE_PATH.read_text(encoding='utf-8')), True
     except (json.JSONDecodeError, OSError):
-        return {}
+        return {}, False
 
 
 def _record_export(filename: Path, content: str) -> None:
-    state = _load_export_state()
+    state, _ = _load_export_state()
     state[filename.name] = _digest(content)
     try:
         EXPORT_STATE_PATH.write_text(
@@ -729,9 +789,25 @@ def check_overwrite(filename: Path) -> str | None:
         Dit si le fichier de sortie a ete retouche depuis le dernier export,
         auquel cas l'ecraser detruirait un reglage saisi a la main.
 
-        Un fichier inconnu de l'etat d'export ne declenche rien : on ne sait
-        pas d'ou il vient, et refuser le premier export de chaque poste serait
-        une nuisance sans contrepartie.
+        Un fichier inconnu d'un etat d'export par ailleurs VALIDE ne
+        declenche rien : on ne sait pas d'ou il vient, et refuser le premier
+        export de chaque poste serait une nuisance sans contrepartie (F3,
+        docs/superpower/plans/erreur_hors_datalogger.md ; decision inchangee,
+        seulement rendue audible quand la cause est un etat perdu plutot
+        qu'un premier export legitime : voir le WARN ci-dessous).
+
+        Deux echecs de LECTURE, traites differemment (F3) :
+          - etat d'export absent ou corrompu (`_load_export_state` renvoie
+            `ok=False`) alors que le fichier de sortie existe deja : la
+            decision reste d'autoriser l'export (un poste neuf ou un fichier
+            d'etat perdu ne doit pas bloquer indefiniment), mais un WARN
+            nomme la situation au lieu de se taire.
+          - fichier de sortie present et TRACE par l'etat mais illisible
+            (verrou d'un autre programme, permission) : c'est exactement le
+            cas que ce garde-fou existe pour couvrir (etalement.urp ajuste
+            a la main entre essais robot), donc on echoue FERME : message de
+            refus, sauf force=True qui outrepasse quand meme (avec avertisse-
+            ment, cote appelant).
 
     Inputs:
         filename (Path): fichier de sortie vise.
@@ -744,13 +820,24 @@ def check_overwrite(filename: Path) -> str | None:
     filename = Path(filename)
     if not filename.is_file():
         return None
-    known = _load_export_state().get(filename.name)
+    state, state_ok = _load_export_state()
+    if not state_ok:
+        print(f"WARN: {EXPORT_STATE_PATH.name} absent ou illisible : "
+              f"impossible de savoir si {filename.name} a deja ete retouche "
+              f"a la main. Export autorise sans verification de retouche "
+              f"pour ce fichier (poste neuf, ou etat d'export perdu).")
+        return None
+    known = state.get(filename.name)
     if known is None:
         return None
     try:
         current = _digest(filename.read_text(encoding='utf-8'))
-    except OSError:
-        return None
+    except OSError as exc:
+        return (f"{filename.name} n'a pas pu etre lu ({exc}) : impossible de "
+                f"verifier s'il a ete retouche a la main depuis le dernier "
+                f"export (peut-etre ouvert dans un autre programme). Refus "
+                f"par prudence pour ne pas ecraser a l'aveugle. Relancer "
+                f"avec force=True pour passer outre.")
     if current == known:
         return None
     return (f"{filename.name} a ete modifie depuis le dernier export "
@@ -761,7 +848,14 @@ def check_overwrite(filename: Path) -> str | None:
 
 def _write_export(filename: Path, content: str, label: str,
                   force: bool) -> bool:
-    """Ecrit un fichier de sortie apres controle d'ecrasement."""
+    """Ecrit un fichier de sortie apres controle d'ecrasement.
+
+    Ecrit en LF explicite (F2). Le fichier part sur un controleur Linux, et
+    le mode texte de Windows y glissait un CRLF par ligne : 817 octets que la
+    chaine generee ne contient pas, invisibles a la relecture puisque
+    `read_text` les retraduit. Un poste Windows et un poste Linux produisaient
+    donc deux fichiers differents pour un meme export.
+    """
     filename = Path(filename)
     warning = check_overwrite(filename)
     if warning and not force:
@@ -770,7 +864,7 @@ def _write_export(filename: Path, content: str, label: str,
     if warning:
         print(f"WARN: {warning}")
     filename.parent.mkdir(parents=True, exist_ok=True)
-    filename.write_text(content, encoding='utf-8')
+    filename.write_text(content, encoding='utf-8', newline='\n')
     _record_export(filename, content)
     return True
 
@@ -780,15 +874,22 @@ def generate_urscript(cycles: list[dict], filename: Path = SCRIPT_PATH,
                       force: bool = False) -> bool:
     """
     Génère un fichier URScript exécutable sur le contrôleur UR5.
-    Retourne False si le fichier a été retouché à la main (sauf force=True)
-    ou si le budget mémoire PolyScope est dépassé.
+    Retourne False si les réglages sont invalides (F1,
+    docs/superpower/plans/erreur_hors_datalogger.md : rien n'est écrit dans
+    ce cas, le contrôle a lieu avant la moindre ouverture de fichier), si le
+    fichier a été retouché à la main (sauf force=True), ou si le budget
+    mémoire PolyScope est dépassé.
     """
-    lines = _build_urscript_lines(cycles, settings)
+    s = settings or get_settings()
+    if _reject_invalid_settings(s, "URScript"):
+        return False
+    lines = _build_urscript_lines(cycles, s)
+    content = '\n'.join(lines)
     filename = Path(filename)
-    if not _write_export(filename, '\n'.join(lines), "URScript", force):
+    if not _write_export(filename, content, "URScript", force):
         return False
     print(f'URScript exporté -> {filename}  ({len(lines)} lignes)')
-    return _validate_script_memory(filename, "URScript")
+    return _validate_script_memory(filename, "URScript", content)
 
 
 def generate_urp(cycles: list[dict], filename: Path = URP_PATH,
@@ -799,12 +900,17 @@ def generate_urp(cycles: list[dict], filename: Path = URP_PATH,
 
     Refuse d'écraser un `.urp` retouché à la main tant que force=True n'est pas
     passé : le fichier de référence porte des réglages d'essai robot saisis
-    directement sur le pendant.
+    directement sur le pendant. Refuse aussi, avant toute écriture, des
+    réglages invalides (F1, docs/superpower/plans/erreur_hors_datalogger.md).
     """
     import xml.etree.ElementTree as ET
     from xml.dom import minidom
 
-    script_content = '\n'.join(_build_urscript_lines(cycles, settings))
+    s = settings or get_settings()
+    if _reject_invalid_settings(s, "URP"):
+        return False
+
+    script_content = '\n'.join(_build_urscript_lines(cycles, s))
 
     root = ET.Element('program')
     root.set('version', '6.0')
@@ -825,7 +931,7 @@ def generate_urp(cycles: list[dict], filename: Path = URP_PATH,
     if not _write_export(filename, xml_out, "URP", force):
         return False
     print(f'URP exporté -> {filename}')
-    return _validate_script_memory(filename, "URP")
+    return _validate_script_memory(filename, "URP", xml_out)
 
 
 def generate_urscript_acq(cycles: list[dict],
@@ -853,13 +959,17 @@ def generate_urscript_acq(cycles: list[dict],
         budget memoire PolyScope est depasse ; True sinon.
     --------------------------------------------------------------------------
     """
-    base_lines = _build_urscript_lines(cycles, settings)
+    s = settings or get_settings()
+    if _reject_invalid_settings(s, "URScript ACQ"):
+        return False
+    base_lines = _build_urscript_lines(cycles, s)
     lines = _build_acq_lines(base_lines)
+    content = '\n'.join(lines)
     filename = Path(filename)
-    if not _write_export(filename, '\n'.join(lines), "URScript ACQ", force):
+    if not _write_export(filename, content, "URScript ACQ", force):
         return False
     print(f'URScript ACQ exporté -> {filename}  ({len(lines)} lignes)')
-    return _validate_script_memory(filename, "URScript ACQ")
+    return _validate_script_memory(filename, "URScript ACQ", content)
 
 
 def generate_urp_acq(cycles: list[dict],
@@ -889,7 +999,10 @@ def generate_urp_acq(cycles: list[dict],
     import xml.etree.ElementTree as ET
     from xml.dom import minidom
 
-    base_lines = _build_urscript_lines(cycles, settings)
+    s = settings or get_settings()
+    if _reject_invalid_settings(s, "URP ACQ"):
+        return False
+    base_lines = _build_urscript_lines(cycles, s)
     script_content = '\n'.join(_build_acq_lines(base_lines))
 
     root = ET.Element('program')
@@ -911,4 +1024,4 @@ def generate_urp_acq(cycles: list[dict],
     if not _write_export(filename, xml_out, "URP ACQ", force):
         return False
     print(f'URP ACQ exporté -> {filename}')
-    return _validate_script_memory(filename, "URP ACQ")
+    return _validate_script_memory(filename, "URP ACQ", xml_out)
