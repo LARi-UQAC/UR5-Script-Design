@@ -375,11 +375,19 @@ static void test_csv_header_carries_the_schema_and_provenance(void)
     char buf[1024];
 
     GROUP("format_csv_header");
-    CHECK(format_csv_header(buf, sizeof(buf), "192.168.4.38", 30004,
+    CHECK(format_csv_header(buf, sizeof(buf), "10.0.0.5", "192.168.4.38", 30004,
                             "2026-08-14", "10:15:30", 123456.789) > 0);
     CHECK(strstr(buf, "# Robot Model: UR5 CB3\n") != NULL);
     CHECK(strstr(buf, "# PolyScope Version: 3.11.0.82155 (20 August 2019)\n") != NULL);
-    CHECK(strstr(buf, "# Data Source: RTDE fallback monitor (192.168.4.14)\n") != NULL);
+    /*
+     * F8: Data Source carries whatever local_addr the caller measured at run
+     * time (the socket's own address), never the old compile-time lab
+     * literal that used to be pinned here.  local_addr and robot_ip are
+     * deliberately different values in this call, to prove Data Source is
+     * driven by its own argument rather than mirroring Robot RTDE Endpoint.
+     */
+    CHECK(strstr(buf, "# Data Source: RTDE fallback monitor (10.0.0.5)\n") != NULL);
+    CHECK(strstr(buf, "# Data Source: RTDE fallback monitor (192.168.4.14)\n") == NULL);
     CHECK(strstr(buf, "# Robot RTDE Endpoint: 192.168.4.38:30004\n") != NULL);
     CHECK(strstr(buf, "# File Creation Date: 2026-08-14\n") != NULL);
     CHECK(strstr(buf, "# File Creation Time: 10:15:30\n") != NULL);
@@ -399,6 +407,23 @@ static void test_csv_header_carries_the_schema_and_provenance(void)
     /* Schema line, last, exactly as the on-robot path writes it. */
     CHECK(strstr(buf,
         "Time,ForceX,ForceY,ForceZ,PoseX,PoseY,PoseZ\n") != NULL);
+}
+
+/*
+ * getsockname() failing degrades the Data Source slot to the literal
+ * "unknown", passed through by format_csv_header exactly like any other
+ * local_addr value: one line, non-empty parentheses, never a crash and never
+ * a silently wrong address.  The socket-level trigger for that fallback is
+ * exercised directly against local_address_of() below.
+ */
+static void test_csv_header_data_source_degrades_to_unknown(void)
+{
+    char buf[1024];
+
+    GROUP("format_csv_header: unknown fallback shape");
+    CHECK(format_csv_header(buf, sizeof(buf), "unknown", "192.168.4.38", 30004,
+                            "2026-08-14", "10:15:30", 123456.789) > 0);
+    CHECK(strstr(buf, "# Data Source: RTDE fallback monitor (unknown)\n") != NULL);
 }
 
 /*
@@ -439,6 +464,70 @@ static void test_csv_filename_is_stamped_and_prefixed(void)
     CHECK_STR(buf, "C:\\data\\ACQ_rtde_20260814_101530.csv");
 }
 
+/* ------------------------------------------------------------------ */
+/* Group D-bis - local_address_of (F8: runtime CSV provenance)        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A real connected socket over loopback: getsockname() succeeds and the
+ * dotted-decimal result is exactly the address the connection actually used,
+ * with none of the mingw-w64 inet_ntop version-gating this function was
+ * written to avoid.
+ */
+static void test_local_address_of_reads_a_real_connected_socket(void)
+{
+    SOCKET listener, client;
+    struct sockaddr_in addr;
+    int addrlen = sizeof(addr);
+    int port;
+    char out[INET_ADDRSTRLEN];
+
+    GROUP("local_address_of: real connected socket");
+    listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;                       /* let Windows pick a free port */
+    bind(listener, (struct sockaddr *)&addr, sizeof(addr));
+    listen(listener, 1);
+    getsockname(listener, (struct sockaddr *)&addr, &addrlen);
+    port = ntohs(addr.sin_port);
+
+    client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons((unsigned short)port);
+    CHECK(connect(client, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+
+    strcpy(out, "garbage");
+    local_address_of(client, out, sizeof(out));
+    CHECK_STR(out, "127.0.0.1");
+
+    closesocket(client);
+    closesocket(listener);
+}
+
+/*
+ * A closed descriptor is no longer a socket at all: getsockname() must fail,
+ * and the function must degrade to the literal "unknown" rather than leave
+ * whatever garbage was already in the buffer, or print an empty/partial
+ * address.
+ */
+static void test_local_address_of_falls_back_on_an_invalid_socket(void)
+{
+    SOCKET s;
+    char out[INET_ADDRSTRLEN];
+
+    GROUP("local_address_of: invalid socket degrades to 'unknown'");
+    s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    closesocket(s);   /* the descriptor is now invalid */
+
+    strcpy(out, "garbage");
+    local_address_of(s, out, sizeof(out));
+    CHECK_STR(out, "unknown");
+}
+
 /* ================================================================== */
 /* Group E - integration against a local fake RTDE server             */
 /* ================================================================== */
@@ -460,6 +549,15 @@ typedef struct {
     double dt;              /* timestamp step between packets */
     int abort_mid_stream;   /* drop the connection abruptly, mid-run */
     int inject_text;        /* interleave RTDE_TEXT_MESSAGE packets */
+    /*
+     * F8: the peer address the server itself observed for this connection,
+     * filled in right after accept().  Since the peer of the server's socket
+     * is the same endpoint as the local address of the client's socket, this
+     * is the independent, server-side witness that the CSV's Data Source
+     * line names the connection that actually wrote the file rather than a
+     * constant.
+     */
+    char observed_client_addr[INET_ADDRSTRLEN];
 } fake_server_cfg_t;
 
 static int fake_send_packet(SOCKET s, unsigned char type,
@@ -537,6 +635,36 @@ static void maybe_text(SOCKET c, const fake_server_cfg_t *cfg)
     }
 }
 
+/*
+ * F8: the address of the client as seen from the server side of the same
+ * connection whose local end local_address_of() reads in the tool itself.
+ * Same shift-and-mask formatting, getpeername() instead of getsockname(),
+ * so the test can compare the CSV's Data Source line against an
+ * independent, server-side witness rather than merely asserting "it looks
+ * like loopback".
+ */
+static void fake_record_peer_address(SOCKET c, char *out, size_t out_len)
+{
+    struct sockaddr_in addr;
+    int addrlen = (int)sizeof(addr);
+    uint32_t host_addr;
+
+    if (out_len == 0) {
+        return;
+    }
+    memset(&addr, 0, sizeof(addr));
+    if (getpeername(c, (struct sockaddr *)&addr, &addrlen) != 0) {
+        snprintf(out, out_len, "%s", "unknown");
+        return;
+    }
+    host_addr = ntohl(addr.sin_addr.s_addr);
+    snprintf(out, out_len, "%u.%u.%u.%u",
+            (unsigned)((host_addr >> 24) & 0xFFu),
+            (unsigned)((host_addr >> 16) & 0xFFu),
+            (unsigned)((host_addr >> 8)  & 0xFFu),
+            (unsigned)(host_addr & 0xFFu));
+}
+
 static DWORD WINAPI fake_server_thread(LPVOID arg)
 {
     fake_server_cfg_t *cfg = (fake_server_cfg_t *)arg;
@@ -553,6 +681,8 @@ static DWORD WINAPI fake_server_thread(LPVOID arg)
     if (c == INVALID_SOCKET) {
         return 1;
     }
+    fake_record_peer_address(c, cfg->observed_client_addr,
+                             sizeof(cfg->observed_client_addr));
 
     /* 1. protocol version */
     if (fake_recv_packet(c, &type, payload, &n) != 0 ||
@@ -755,6 +885,173 @@ static const char *first_data_row(const char *text)
     return p ? p + strlen(CSV_SCHEMA_LINE) : NULL;
 }
 
+/* ------------------------------------------------------------------ */
+/* Group D-ter - csv_open() suffix exhaustion (F14)                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * These exercise csv_open() itself, so they touch the real filesystem under
+ * a throwaway directory, cleaned up at the end of each test.  csv_open()
+ * computes its stamp from time(NULL) internally rather than accepting one,
+ * so the exhaustion and ordinary-path tests below rely on the same
+ * same-wall-clock-second assumption already used by
+ * test_two_runs_produce_two_distinct_files above: fast, back-to-back calls
+ * in practice land in one second.
+ */
+
+static void write_marker_file(const char *path, const char *marker)
+{
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fputs(marker, f);
+        fclose(f);
+    }
+}
+
+static int file_holds(const char *path, const char *marker)
+{
+    size_t len = 0;
+    char *text = read_text(path, &len);
+    int ok;
+
+    if (!text) {
+        return 0;
+    }
+    ok = (strcmp(text, marker) == 0);
+    free(text);
+    return ok;
+}
+
+static void compute_current_stamp(char *stamp, size_t stamp_len)
+{
+    time_t now = time(NULL);
+    struct tm *lt = localtime(&now);
+    strftime(stamp, stamp_len, "%Y%m%d_%H%M%S", lt);
+}
+
+/*
+ * F14, potential test 1.  Pre-create the bare name and every _1 through _99
+ * suffix (100 candidate names for one wall-clock second), then open a run
+ * with that same stamp.  Before the fix, the suffix loop stopped once
+ * suffix reached 100 regardless of whether the last name it built was still
+ * taken, so fopen(w->path, "wb") silently truncated one of these
+ * already-recorded trials.  After the fix, csv_open() must refuse instead:
+ * no candidate is opened, and all 100 pre-created files are left
+ * byte-for-byte intact.
+ */
+static void test_csv_open_refuses_when_all_100_names_are_taken(void)
+{
+    const char *dir = "_tmp_f14a";
+    static const char marker[] = "SENTINEL-DO-NOT-TRUNCATE";
+    char stamp[64];
+    char path[MAX_PATH];
+    csv_writer_t w;
+    int i;
+
+    GROUP("csv_open: refuses when all 100 same-second names are taken");
+    fresh_dir(dir);
+    compute_current_stamp(stamp, sizeof(stamp));
+
+    format_csv_filename(path, sizeof(path), dir, stamp);
+    write_marker_file(path, marker);
+    for (i = 1; i < 100; i++) {
+        char base[64];
+        snprintf(base, sizeof(base), "%s_%d", stamp, i);
+        format_csv_filename(path, sizeof(path), dir, base);
+        write_marker_file(path, marker);
+    }
+
+    memset(&w, 0, sizeof(w));
+    CHECK(csv_open(&w, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0) != 0);
+    CHECK(w.fp == NULL);
+
+    /* None of the 100 pre-recorded "trials" was reopened in "wb" mode. */
+    format_csv_filename(path, sizeof(path), dir, stamp);
+    CHECK(file_holds(path, marker));
+    for (i = 1; i < 100; i++) {
+        char base[64];
+        snprintf(base, sizeof(base), "%s_%d", stamp, i);
+        format_csv_filename(path, sizeof(path), dir, base);
+        CHECK(file_holds(path, marker));
+    }
+
+    rmdir_recursive(dir);
+}
+
+/*
+ * F14, potential test 2.  The ordinary path must be untouched by the fix:
+ * no collision opens the bare name, one collision opens _1, two collisions
+ * open _2.  Three back-to-back calls, each closed before the next opens,
+ * exercise exactly that progression against the real suffix loop.
+ */
+static void test_csv_open_ordinary_suffix_progression(void)
+{
+    const char *dir = "_tmp_f14b";
+    csv_writer_t w1, w2, w3;
+    char expect1[MAX_PATH], expect2[MAX_PATH];
+    size_t base_len;
+
+    GROUP("csv_open: ordinary suffix progression (0, 1, 2 collisions)");
+    fresh_dir(dir);
+    memset(&w1, 0, sizeof(w1));
+    memset(&w2, 0, sizeof(w2));
+    memset(&w3, 0, sizeof(w3));
+
+    /* Fresh directory: the first call has zero collisions, so it must open
+     * the bare name with no suffix at all. */
+    CHECK(csv_open(&w1, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0) == 0);
+    csv_close(&w1);
+
+    /* One collision (the file w1 just left behind): must open _1. */
+    CHECK(csv_open(&w2, dir, INVALID_SOCKET, "192.168.4.38", 30004, 2.0) == 0);
+    csv_close(&w2);
+
+    /* Two collisions (w1's file and w2's _1): must open _2. */
+    CHECK(csv_open(&w3, dir, INVALID_SOCKET, "192.168.4.38", 30004, 3.0) == 0);
+    csv_close(&w3);
+
+    base_len = strlen(w1.path) - 4;   /* strip the trailing ".csv" */
+    snprintf(expect1, sizeof(expect1), "%.*s_1.csv", (int)base_len, w1.path);
+    snprintf(expect2, sizeof(expect2), "%.*s_2.csv", (int)base_len, w1.path);
+    CHECK_STR(w2.path, expect1);
+    CHECK_STR(w3.path, expect2);
+
+    rmdir_recursive(dir);
+}
+
+/*
+ * F14, potential test 3.  A target that cannot be opened for writing must
+ * report the failure rather than claim success, and must not crash - the
+ * existing fopen() NULL check, exercised here through an out_dir that names
+ * a plain file rather than a directory, so every candidate name built
+ * underneath it is unopenable independently of the suffix loop or of the
+ * wall clock.  This is the complementary case to test 1 above: there, the
+ * name matches an existing CSV that must not be truncated; here, the name
+ * cannot be created at all, and that failure must still be reported (not
+ * silently swallowed) with w->fp left NULL.
+ */
+static void test_csv_open_reports_failure_when_target_is_not_writable(void)
+{
+    const char *not_a_dir = "_tmp_f14c_not_a_dir";
+    csv_writer_t w;
+    FILE *f;
+
+    GROUP("csv_open: unwritable target reports failure, not success");
+    remove(not_a_dir);
+    f = fopen(not_a_dir, "wb");
+    CHECK(f != NULL);
+    if (f) {
+        fclose(f);
+    }
+
+    memset(&w, 0, sizeof(w));
+    CHECK(csv_open(&w, not_a_dir, INVALID_SOCKET, "192.168.4.38", 30004,
+                   1.0) != 0);
+    CHECK(w.fp == NULL);
+
+    remove(not_a_dir);
+}
+
 /* -- the integration scenarios ------------------------------------- */
 
 static int run_against_fake(fake_server_cfg_t *cfg, const char *out_dir)
@@ -820,6 +1117,24 @@ static void test_one_run_produces_one_csv(void)
 
     CHECK(strstr(text, "# Robot Model: UR5 CB3\n") != NULL);
     CHECK(strstr(text, CSV_SCHEMA_LINE) != NULL);
+    /*
+     * F8: a loopback run must name 127.0.0.1 in Data Source, never the old
+     * compile-time lab-computer literal, and it must agree with what the
+     * fake server itself observed as the peer of this exact connection -
+     * not merely "looks like loopback" but the actual address of the socket
+     * that wrote the file.
+     */
+    CHECK(strstr(text, "# Data Source: RTDE fallback monitor (127.0.0.1)\n") != NULL);
+    CHECK(strstr(text, "# Data Source: RTDE fallback monitor (192.168.4.14)\n") == NULL);
+    CHECK(cfg.observed_client_addr[0] != '\0');
+    if (cfg.observed_client_addr[0] != '\0') {
+        char expected_source[128];
+
+        snprintf(expected_source, sizeof(expected_source),
+                "# Data Source: RTDE fallback monitor (%s)\n",
+                cfg.observed_client_addr);
+        CHECK(strstr(text, expected_source) != NULL);
+    }
     /*
      * The absolute controller clock of the file's first sample is recorded.
      * That is the first PLAYING packet (t_start + one step), not the STOPPED
@@ -1094,8 +1409,16 @@ int main(void)
     test_csv_row_time_resolution_is_one_millisecond();
     test_csv_row_refuses_a_short_buffer();
     test_csv_header_carries_the_schema_and_provenance();
+    test_csv_header_data_source_degrades_to_unknown();
     test_csv_filename_is_stamped_and_prefixed();
     test_ipv4_validation();
+
+    test_local_address_of_reads_a_real_connected_socket();
+    test_local_address_of_falls_back_on_an_invalid_socket();
+
+    test_csv_open_refuses_when_all_100_names_are_taken();
+    test_csv_open_ordinary_suffix_progression();
+    test_csv_open_reports_failure_when_target_is_not_writable();
 
     test_one_run_produces_one_csv();
     test_pause_does_not_split_the_file();

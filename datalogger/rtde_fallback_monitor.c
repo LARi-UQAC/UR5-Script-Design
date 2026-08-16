@@ -233,16 +233,22 @@ static int format_csv_row(char *buf, size_t buflen, double t_rel,
  * The header is self-describing on purpose: the Time convention is stated in
  * the file, so a CSV never needs a second document to be interpreted, and the
  * absolute controller clock of the first sample is kept so referencing Time
- * to that sample loses nothing.
+ * to that sample loses nothing.  The Data Source line names local_addr, the
+ * caller-supplied address of the socket that actually wrote the file (see
+ * local_address_of below) - never a compile-time guess of which machine is
+ * running the tool.  It is deliberately a separate parameter from robot_ip
+ * (the peer, on the "Robot RTDE Endpoint" line below): one is local, the
+ * other is remote, and they must never be conflated.
  */
-static int format_csv_header(char *buf, size_t buflen, const char *robot_ip,
-                             int robot_port, const char *date_str,
-                             const char *time_str, double rtde_t0)
+static int format_csv_header(char *buf, size_t buflen, const char *local_addr,
+                             const char *robot_ip, int robot_port,
+                             const char *date_str, const char *time_str,
+                             double rtde_t0)
 {
     int n = snprintf(buf, buflen,
         "# Robot Model: UR5 CB3\n"
         "# PolyScope Version: 3.11.0.82155 (20 August 2019)\n"
-        "# Data Source: RTDE fallback monitor (192.168.4.14)\n"
+        "# Data Source: RTDE fallback monitor (%s)\n"
         "# Robot RTDE Endpoint: %s:%d\n"
         "# File Creation Date: %s\n"
         "# File Creation Time: %s\n"
@@ -251,7 +257,7 @@ static int format_csv_header(char *buf, size_t buflen, const char *robot_ip,
         " of this file (s)\n"
         "# RTDE Timestamp At First Sample: %.6f s (controller uptime)\n"
         CSV_SCHEMA_LINE,
-        robot_ip, robot_port, date_str, time_str, rtde_t0);
+        local_addr, robot_ip, robot_port, date_str, time_str, rtde_t0);
 
     if (n < 0 || (size_t)n >= buflen) {
         return -1;
@@ -329,22 +335,66 @@ static int file_exists(const char *path)
 }
 
 /*
+ * The local end of the socket already connected to the robot: the interface
+ * this data actually arrived on, and the only honest "Data Source" value on
+ * a machine that can have more than one address.  A spare laptop during
+ * commissioning, a developer workstation, or the loopback emulator rig all
+ * reach the robot (or a fake server under test) through a different address
+ * than the one lab computer a compile-time constant would have named, and a
+ * wrong guess is worse than none for a field whose whole point is
+ * provenance.  getsockname() failing - a closed or otherwise invalid socket -
+ * degrades to the literal "unknown" rather than a plausible-looking wrong
+ * address; never guess.
+ *
+ * Formatted by hand from the network-order address with the same
+ * shift-and-mask style as read_be_u32 above, rather than through
+ * inet_ntop(): mingw-w64 gates that declaration behind
+ * _WIN32_WINNT >= 0x0600 (Vista) and this project pins no Windows version.
+ */
+static void local_address_of(SOCKET s, char *out, size_t out_len)
+{
+    struct sockaddr_in addr;
+    int addrlen = (int)sizeof(addr);
+    uint32_t host_addr;
+
+    if (out_len == 0) {
+        return;
+    }
+    memset(&addr, 0, sizeof(addr));
+    if (getsockname(s, (struct sockaddr *)&addr, &addrlen) != 0) {
+        snprintf(out, out_len, "%s", "unknown");
+        return;
+    }
+    host_addr = ntohl(addr.sin_addr.s_addr);
+    if (snprintf(out, out_len, "%u.%u.%u.%u",
+                (unsigned)((host_addr >> 24) & 0xFFu),
+                (unsigned)((host_addr >> 16) & 0xFFu),
+                (unsigned)((host_addr >> 8)  & 0xFFu),
+                (unsigned)(host_addr & 0xFFu)) < 0) {
+        snprintf(out, out_len, "%s", "unknown");
+    }
+}
+
+/*
  * Open the CSV for one robot program run.  The name carries the lab
  * computer's wall clock; a same-second collision (two short trials, or a
  * restart) gets a _1, _2 ... suffix rather than overwriting a trial that has
  * already been recorded.
  */
-static int csv_open(csv_writer_t *w, const char *out_dir, const char *robot_ip,
-                    int robot_port, double rtde_ts)
+static int csv_open(csv_writer_t *w, const char *out_dir, SOCKET sock,
+                    const char *robot_ip, int robot_port, double rtde_ts)
 {
     char header[1024];
     char stamp[64];
     char date_str[32];
     char time_str[32];
     char base[MAX_PATH];
+    char local_addr[INET_ADDRSTRLEN];
     time_t now = time(NULL);
     struct tm *lt = localtime(&now);
     int suffix;
+
+    local_address_of(sock, local_addr, sizeof(local_addr));
 
     strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", lt);
     strftime(date_str, sizeof(date_str), "%Y-%m-%d", lt);
@@ -360,6 +410,23 @@ static int csv_open(csv_writer_t *w, const char *out_dir, const char *robot_ip,
             return -1;
         }
     }
+    /*
+     * The loop above tries the bare name, then _1 through _99: 100 candidate
+     * names for one wall-clock second.  It stops either because it found a
+     * free one, or because suffix reached 100 with the last candidate (_99)
+     * still taken - the "suffix < 100" operand ends the loop independently of
+     * what file_exists() just reported.  Only checking file_exists() again,
+     * here, tells the two cases apart.  Falling through would fopen() an
+     * existing CSV in "wb" mode and silently destroy a previously recorded
+     * trial, which is exactly the guarantee this module and the README
+     * promise never to break.
+     */
+    if (file_exists(w->path)) {
+        fprintf(stderr, "[RTDE] all 100 filenames for stamp '%s' in '%s' are "
+                        "already taken; refusing to overwrite an existing "
+                        "trial\n", stamp, out_dir);
+        return -1;
+    }
 
     w->fp = fopen(w->path, "wb");
     if (!w->fp) {
@@ -367,8 +434,8 @@ static int csv_open(csv_writer_t *w, const char *out_dir, const char *robot_ip,
                 w->path, strerror(errno));
         return -1;
     }
-    if (format_csv_header(header, sizeof(header), robot_ip, robot_port,
-                          date_str, time_str, rtde_ts) < 0) {
+    if (format_csv_header(header, sizeof(header), local_addr, robot_ip,
+                          robot_port, date_str, time_str, rtde_ts) < 0) {
         fclose(w->fp);
         w->fp = NULL;
         return -1;
@@ -808,7 +875,7 @@ static int monitor_run_once(const char *ip, int port, const char *out_dir)
         action = decide_file_action(prev_state, state);
         prev_state = state;
         if (action == FILE_ACTION_OPEN) {
-            if (csv_open(&writer, out_dir, ip, port, ts) != 0) {
+            if (csv_open(&writer, out_dir, conn.sock, ip, port, ts) != 0) {
                 rc = MON_ERR_STREAM;
                 break;
             }
