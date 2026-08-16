@@ -32,11 +32,15 @@ consuming `etalement.script` only — nothing changes on the sim side.
 
 - `datalogger/` already exists and holds the **other** path, the RTDE fallback monitor
   (`rtde_fallback_monitor.c`, 909 lines, commit 8c7c30e), its C test harness (147 checks,
-  `datalogger/tests/`) and `datalogger/README.md`. The acquisition daemon of this plan
-  lands **beside** it: same folder, different language (Python), different test runner
-  (`unittest` under `tests/`, not the `.bat` harness). `datalogger/README.md` carries a
-  status table whose row "On-robot logger (main)" says `Planned` and points at this plan;
-  flipping it to `Implemented` is part of the work (task D1).
+  `datalogger/tests/`) and `datalogger/README.md`. **`datalogger/` is exclusively C**
+  (operator decision, 2026-08-16): it is the executable that records what the robot
+  transmits on its port, and nothing Python belongs there. The acquisition daemon of this
+  plan therefore lands in its own folder, **`onrobot/`**, named for the criterion that
+  actually separates the two paths - what runs on the controller against what runs on the
+  lab computer. Its tests live in `tests/` and ARE collected by `unittest discover`, unlike
+  the C harness. `datalogger/README.md` carries a status table whose row "On-robot logger
+  (main)" says `Planned` and points at this plan; flipping it to `Implemented`, and writing
+  `onrobot/README.md`, is task D1.
 - **Robot emulation, two distinct things.** The only emulator that exists as code today is
   `fake_server_thread` in `datalogger/tests/test_rtde_fallback_monitor.c`: it speaks the
   RTDE handshake on `127.0.0.1`, replays a scripted `runtime_state` sequence, and lets the
@@ -134,15 +138,15 @@ Rules of the split:
 
 | # | Task | Complexity | Owner | Depends on |
 |---|---|---|---|---|
-| A1 | `datalogger/acq_logger_daemon.py` against the contract in §3-bis | Medium (stdlib sockets, threads, CSV bytes) | Sonnet | §3-bis (Opus) |
-| A2 | `datalogger/urmagic_acqlogger.sh` | Low | Sonnet | - |
+| A1 | `onrobot/acq_logger_daemon.py` against the contract in §3-bis | Medium (stdlib sockets, threads, CSV bytes) | Sonnet | §3-bis (Opus) |
+| A2 | `onrobot/urmagic_acqlogger.sh` | Low | Sonnet | - |
 | B1 | `design/params.py`: `ACQ_*` constants and acq output paths | Low | Sonnet | - |
-| E1 | `datalogger/acq_emulator.py` (fake FT-300 server + fake robot client replaying real poses), standalone, with the two `feat/rtde-emulator` seams named in the docstring | Medium | Sonnet | §3-ter (Opus) |
+| E1 | `onrobot/acq_emulator.py` (fake FT-300 server + fake robot client replaying real poses), standalone, with the two `feat/rtde-emulator` seams named in the docstring | Medium | Sonnet | §3-ter (Opus) |
 | C1 | `_build_acq_lines()`: logger thread, tick alternation, anchor insertion, STOP handshake | **High** (CB3 semantics, 8 ms tick, thread rules, anchor stability) | **Opus** | B1 |
 | C2 | `generate_urscript_acq()` / `generate_urp_acq()` + `design/app.py` wiring + overwrite guard | Medium | Sonnet | C1 |
 | T1 | `tests/test_acq_logger_daemon.py` | Medium | Sonnet | A1, E1 |
 | T2 | `tests/test_acq_export.py` (the 3 guarantees of §3) | Medium | Sonnet | C1, C2 |
-| D1 | `datalogger/README.md`: acq section, deployment steps, status row flipped | Low | Sonnet | A1, A2, C2 |
+| D1 | `onrobot/README.md`: acq section, deployment steps, status row flipped | Low | Sonnet | A1, A2, C2 |
 | D2 | `ARCHITECTURE.md` + root `CLAUDE.md`: acq entries and invariants | Medium (states invariants) | **Opus** | C1, C2 |
 | V1 | Full suite, byte-identity of `etalement.script`, `ur5_sim --check`, `pip-audit` | Verification | **Opus, never delegated** | all |
 
@@ -223,19 +227,19 @@ URScript (data_logger thread, 50 Hz)
 
 | File | Content |
 |---|---|
-| `datalogger/acq_logger_daemon.py` | Full contract in **§3-bis**. Python **2.7-compatible**, stdlib only (CB3 ships Python 2.7). Threads: (a) FT-300 reader — connects 63351, parses `(Fx, Fy, Fz, Mx, My, Mz)` text stream, keeps latest triple, auto-reconnect; (b) log server on 50100 — accepts URScript connection, parses `[t,x,y,z]` (or 7-field fallback) lines, appends to in-RAM list, on `STOP` writes CSV (metadata block + header + rows) to detected USB mount, replies status. USB mount auto-detected from `/proc/mounts` (vfat/exfat under `/media` or `/programs`); falls back to `/tmp` with a warning if no USB. |
-| `datalogger/urmagic_acqlogger.sh` | Kills previous instance, launches daemon with `nohup`, logs to USB. Short, auditable. |
-| `datalogger/acq_emulator.py` | Dev-machine only. Fake FT-300 server on 63351 plus a fake robot client that replays the real poses of `etalement.script` into port 50100 at 50 Hz and closes with `STOP`. Full contract in §3-ter. Makes the offline verification an end-to-end run instead of a unit test, and is the acquisition-side mirror of the C `fake_server_thread`. |
+| `onrobot/acq_logger_daemon.py` | Full contract in **§3-bis**. Python **2.7-compatible**, stdlib only (CB3 ships Python 2.7). Threads: (a) FT-300 reader — connects 63351, parses `(Fx, Fy, Fz, Mx, My, Mz)` text stream, keeps latest triple, auto-reconnect; (b) log server on 50100 — accepts URScript connection, parses `[t,x,y,z]` (or 7-field fallback) lines, appends to in-RAM list, on `STOP` writes CSV (metadata block + header + rows) to detected USB mount, replies status. USB mount auto-detected from `/proc/mounts` (vfat/exfat under `/media` or `/programs`); falls back to `/tmp` with a warning if no USB. |
+| `onrobot/urmagic_acqlogger.sh` | Kills previous instance, launches daemon with `nohup`, logs to USB. Short, auditable. |
+| `onrobot/acq_emulator.py` | Dev-machine only. Fake FT-300 server on 63351 plus a fake robot client that replays the real poses of `etalement.script` into port 50100 at 50 Hz and closes with `STOP`. Full contract in §3-ter. Makes the offline verification an end-to-end run instead of a unit test, and is the acquisition-side mirror of the C `fake_server_thread`. |
 | `design/params.py` (additions only) | New constants per ARCHITECTURE rule 1: `ACQ_LOG_PORT = 50100`, `ACQ_SAMPLE_TARGET_MS = 20`, `ACQ_MAX_SAMPLES = 11700`, `ACQ_SCRIPT_PATH` / `ACQ_URP_PATH` (`etalement_acq.script` / `.urp`). No existing constant touched. |
 | `design/export.py` (additions only) | New `_build_acq_lines(base_lines)` wraps the untouched output of `_build_urscript_lines()`: inserts (a) header comment block for the acquisition process, (b) BeforeStart socket-open + abort-popup if daemon absent, (c) `thread data_logger():` definition, (d) `run data_logger()` right after `set_tcp(...)`, (e) shutdown + STOP handshake after the final retreat, before program end. Insertion via stable anchor lines already emitted by the builder (e.g. the `set_tcp` line and the retreat comment block); a missing anchor is a hard export error, not a silent skip. New `generate_urscript_acq()` / `generate_urp_acq()` reuse `_validate_script_memory()` on the acq files. `generate_urscript()` / `generate_urp()` are **not modified**. |
 | `design/app.py` (additions only) | `--export` / `--export-urp` now also write the `_acq` twin after the original (original files written first, byte-identical to today). |
-| `datalogger/README.md` | Deployment procedure (USB insertion, daemon check, load `etalement_acq.script`, run, retrieve CSV), version-dependency notes, FT-300 vs `get_tcp_force()` switch, and the rule: simulation always uses `etalement.script`. |
+| `onrobot/README.md` | Deployment procedure (USB insertion, daemon check, load `etalement_acq.script`, run, retrieve CSV), version-dependency notes, FT-300 vs `get_tcp_force()` switch, and the rule: simulation always uses `etalement.script`. |
 | `tests/test_acq_logger_daemon.py` | stdlib `unittest`, offline: fake FT-300 server + fake URScript client on loopback; asserts CSV metadata block, header `Time,ForceX,ForceY,ForceZ,PoseX,PoseY,PoseZ`, row count == sent count, no trailing preallocated rows, filename format, collision suffix, STOP handshake, buffer cap at 11700 with clean auto-stop. Must run on Windows dev machine (pure sockets, temp dir as fake USB). Daemon code stays Python-2.7-valid but the test may run it under the project venv's Python 3 — write it 2/3-compatible (no f-strings, `print()` function, etc.). |
 | `tests/test_acq_export.py` | Three guarantees: (1) **regression** — lines produced for `etalement.script` are identical with and without the acq feature present (original untouched); (2) **equivalence** — `parse_poses(etalement_acq.script)` returns exactly the same 4-tuples as `parse_poses(etalement.script)` (lenient parser ignores the thread block; motion unchanged); (3) **content** — acq script contains the thread def, `keep_logging`, bounds guard `log_index < ACQ_MAX_SAMPLES`, socket open before motion, STOP after retreat, and no `movel`/`stopl`/slicing inside the thread block. Memory budget asserted on the acq file too. |
 
 ## 3-bis. Daemon contract (authored by Opus, implemented by Sonnet in task A1)
 
-`datalogger/acq_logger_daemon.py`, stdlib only, valid Python 2.7 and 3.x. Tests load it by
+`onrobot/acq_logger_daemon.py`, stdlib only, valid Python 2.7 and 3.x. Tests load it by
 path (`importlib.util.spec_from_file_location`), so it stays a **plain module**: no package
 `__init__.py`, no relative import, no assumption about its parent folder. That is what lets
 the same file be copied alone onto the USB key.
@@ -300,7 +304,7 @@ are prefixed `[ACQ]`; `urmagic_acqlogger.sh` redirects them to a log file on the
 
 ## 3-ter. Emulator contract (authored by Opus, implemented by Sonnet in task E1)
 
-`datalogger/acq_emulator.py`, Python 3, dev machine only, never shipped to the robot. It is
+`onrobot/acq_emulator.py`, Python 3, dev machine only, never shipped to the robot. It is
 the acquisition-side mirror of the C `fake_server_thread`, and it is what makes the offline
 smoke run of §7 a real end-to-end exercise rather than a unit test.
 
@@ -389,7 +393,7 @@ Ownership and complexity are set in §0-bis; this is the sequence.
    wiring, Sonnet) with zero edits inside `_build_urscript_lines()`, `generate_urscript()`
    or `generate_urp()`; then T1 and T2 in parallel (Sonnet), run with
    `python -m unittest tests.test_acq_logger_daemon tests.test_acq_export -v`.
-4. **Wave 4**: D1 (`datalogger/README.md`: acq section, deployment guide, status row
+4. **Wave 4**: D1 (`onrobot/README.md`: acq section, deployment guide, status row
    flipped to `Implemented`, Sonnet) and D2 (`ARCHITECTURE.md` and root `CLAUDE.md`, Opus).
 5. **Wave 5, V1, Opus only, nothing delegated**:
    - `python -m unittest discover -s tests -p "test_*.py"` - full suite green.
