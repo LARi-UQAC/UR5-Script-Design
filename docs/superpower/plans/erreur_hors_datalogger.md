@@ -464,6 +464,34 @@ from the same UI state, never one alone. Test 1 above fails loudly if that slips
 
 ---
 
+## F12. Two stale comments in `viewer.py`, one of which only breaks off Windows (Low) - FIXED
+
+**Audit basis.** Reported 2026-08-16 by the agent fixing F4, F5 and F9, outside its own
+scope, while checking that every `see ...` comment under `ur5_sim/` resolves on disk.
+
+**Where and what.** Two comments in `ur5_sim/visualization/viewer.py`:
+
+1. The `visualize()` docstring, under `cycle_per_frame`, stated that the viewer "publishes a
+   live TCP status to `tcp_live.json` for cross-process consumption by the design UI". That
+   file exchange was retired in favour of UDP loopback on `127.0.0.1:47811`
+   (`ur5_sim/ipc_config.py`), and F5 has just deleted the file itself. A reader trusting the
+   docstring would have gone looking for something nothing writes any more.
+2. A comment pointed at `meshes/TestMeasure.PNG`; the tracked file is `TestMeasure.png`.
+   Windows resolves it either way, so the new `tests/test_repo_hygiene.py` comment check
+   passes on this machine and would fail on a case-sensitive checkout. That asymmetry is the
+   interesting part: the hygiene test is only as strong as the filesystem it runs on.
+
+**Correction applied.** Both comments corrected in place; the docstring now names the UDP
+mechanism and says the file exchange is retired.
+
+**Potential tests.** Covered by the `see ...` comment check already added in
+`tests/test_repo_hygiene.py` for the second one, with the caveat above. Worth adding, if the
+repository is ever built or tested on Linux: compare each referenced path against the
+tracked set from `git ls-files` (which is case-sensitive) rather than against the
+filesystem, so the check stops depending on the host.
+
+---
+
 ## Execution note
 
 Same split as [`plan_acq_datalogger.md`](plan_acq_datalogger.md) §0-bis: the corrections
