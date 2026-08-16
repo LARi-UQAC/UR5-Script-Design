@@ -415,6 +415,55 @@ regeneration also rewrites the line endings, so do it in one deliberate commit.
 
 ---
 
+## F11. The shipped acq twin was not the twin of the shipped original (High) - FIXED
+
+**Audit basis.** Found 2026-08-16 while preparing the F2/F10 fix, by counting poses in the
+two tracked artifacts. Introduced by commit `bccdbb2` of this same branch, which tracked
+`etalement_acq.script` "for the student".
+
+**Where.** The repo root pair. `etalement.script` parsed to **661** poses (663 `movel`
+lines, 818 lines); `etalement_acq.script` parsed to **346** (348 `movel`, 570 lines). Both
+declare six cycles, so nothing about their shape gives the difference away at a glance.
+
+**Consequence.** They were not the same trajectory. `etalement.script` is the operator's
+export from the interactive UI, the trial-of-record; the acq twin had been produced by a
+headless `--export` from `design/params.py` defaults, which is a coarser program with about
+half the waypoints. A student loading `etalement_acq.script` to record an instrumented run
+would have executed a different motion from the validated protocol, and the resulting force
+and position data would not describe the trial anyone thinks it describes. The failure is
+silent by construction: both files are valid, both pass every existing test, both run on the
+robot, and the only visible difference is a pose count nobody counts. This is the direct
+descendant of F10 - because no artifact records the configuration that produced it, nothing
+could flag that these two came from different ones.
+
+**Cause, plainly.** The plan owner ran `--export --no-show` during verification, which
+regenerated the acq twin from defaults, then committed it beside an original that had not
+been regenerated. Guarantee 2 of the acquisition plan (pose equivalence) was verified on
+freshly generated pairs, never on the tracked pair, so the guarantee was true of the
+generator and false of the shipped files.
+
+**Correction applied.** The twin was rebuilt from the reference itself rather than from
+defaults: `_build_acq_lines()` was applied to the lines of the committed `etalement.script`,
+which is exactly what the exporter does internally, so the acq block wraps the trial-of-record
+motion. Result: 661 poses on both sides, identical pose by pose, cycle index by cycle index,
+`in_contact` flag by flag; 114 794 bytes, 57.4% of the PolyScope budget. `etalement.script`
+itself was not touched.
+
+**Tests** (`tests/test_artifact_consistency.py`, written with this entry):
+
+1. The two **tracked** artifacts carry identical motion: same pose count, same poses, same
+   cycle indices, same `in_contact` flags. This is guarantee 2 applied to the shipped files
+   rather than to a freshly generated pair, which is the gap that let F11 through.
+2. The tracked acq twin stays inside the PolyScope memory budget.
+3. The acq twin contains the logger thread, so a twin accidentally replaced by a plain copy
+   of the original is caught too.
+
+**Residual risk, for the operator.** Regenerating one file without the other reintroduces
+this immediately. `--export` now writes both, so the safe habit is to always export the pair
+from the same UI state, never one alone. Test 1 above fails loudly if that slips.
+
+---
+
 ## Execution note
 
 Same split as [`plan_acq_datalogger.md`](plan_acq_datalogger.md) §0-bis: the corrections
