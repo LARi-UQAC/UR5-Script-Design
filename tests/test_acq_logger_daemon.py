@@ -330,7 +330,7 @@ class _BaseSessionTestCase(unittest.TestCase):
             # (e.g. the USB key vanished mid-trial). Deliberately not a
             # colliding-path os.makedirs() failure here: that raises a
             # real, OS-generated OSError whose text is localized (see
-            # KnownDaemonBugTests below for what that does on this
+            # ReplyEncodingRegressionTests below for what that does on this
             # host), which would make this required-coverage test
             # depend on the host's locale instead of on the daemon's
             # documented ERR/RETRY contract.
@@ -533,28 +533,27 @@ class LogServerFailureRetryTests(_BaseSessionTestCase):
         self.assertEqual(len(rows), 2)
 
 
-class KnownDaemonBugTests(_BaseSessionTestCase):
-    """Not required coverage: a defect this suite happened to surface
-    while building the item above. Left failing on purpose, per the
-    task instructions to report a daemon-side failure rather than
-    "fix" acq_logger_daemon.py to make it pass."""
+class ReplyEncodingRegressionTests(_BaseSessionTestCase):
+    """Regression test for a defect this suite surfaced while building
+    the item above, fixed in acq_logger_daemon.py `_reply()`. Kept
+    because the failure mode is invisible on an English-locale machine
+    and would come straight back if the encoding were tightened again."""
 
-    def test_localized_os_error_text_breaks_the_err_reply(self):
-        """_finalize's except clause builds "ERR %s" % exc straight
-        from the caught OSError, and _reply() hard-encodes to ASCII
-        (acq_logger_daemon.py, _reply()). A real filesystem OSError's
-        text is whatever the OS localizes it to - on this Windows host
-        (French locale) os.makedirs() colliding with an existing file
-        raises FileExistsError with an accented message, so _reply()
-        itself raises UnicodeEncodeError. That exception is not caught
-        anywhere in _finalize or serve_one_session, so it propagates out
-        of the background thread: no "ERR ..." line is ever sent, and
-        serve_one_session's own finally block closes the socket, which
-        also destroys the connection RETRY would have needed. This is
-        the real, portable "unwritable directory" scenario (a colliding
-        file at the resolved path, not a synthetic OSError), and it
-        fails the documented contract (section 3-bis: a write failure
-        replies ERR and keeps the connection open for RETRY).
+    def test_localized_os_error_text_does_not_break_the_err_reply(self):
+        """_finalize builds "ERR %s" % exc straight from the caught
+        OSError, whose text is whatever the operating system localizes
+        it to. On this Windows host (French locale) os.makedirs()
+        colliding with an existing file raises FileExistsError with an
+        accented message. _reply() used to encode strictly to ASCII, so
+        it raised UnicodeEncodeError itself, inside the background
+        thread, where nothing catches it: no "ERR ..." line was ever
+        sent, and serve_one_session's finally block then closed the
+        socket, destroying the connection RETRY needs. The one path
+        whose purpose is to report a write failure failed silently.
+        _reply() now encodes with "replace". This is the real, portable
+        scenario (a colliding file at the resolved path, not a synthetic
+        OSError) and it holds the contract of section 3-bis: a write
+        failure replies ERR and keeps the connection open for RETRY.
         """
         bad_path = os.path.join(self.usb_dir, "not_a_directory")
         with open(bad_path, "w"):
