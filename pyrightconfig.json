@@ -3,8 +3,7 @@
     "ur5_etalementv6.py",
     "ur5_sim",
     "tests",
-    "run_validate.py",
-    "validate_etalement.py"
+    "run_validate.py"
   ],
   "exclude": [
     "**/__pycache__",

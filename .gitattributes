@@ -2,3 +2,42 @@
 # sur la ligne shebang casse l interpreteur. Il reste en LF sur tout poste,
 # quelle que soit la configuration core.autocrlf de la machine.
 *.sh text eol=lf
+
+# Windows batch scripts run under cmd.exe, which is not forgiving of a bare
+# LF; force CRLF regardless of the writing workstation's core.autocrlf.
+*.bat text eol=crlf
+
+# C sources, Python modules, Markdown and JSON are plain LF text. Nothing
+# here is read by a controller that cares about the newline byte, so there
+# is no reason to let a workstation's line-ending setting turn an unrelated
+# edit into a whole-file diff.
+*.c text eol=lf
+*.h text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.txt text eol=lf
+*.html text eol=lf
+*.xacro text eol=lf
+
+# Repo bookkeeping files carry no extension of their own.
+.gitattributes text eol=lf
+.gitignore text eol=lf
+
+# Binary mesh / image / archive formats: never let git compute a text diff
+# or rewrite a byte of these on checkout.
+*.stl binary
+*.STL binary
+*.dae binary
+*.png binary
+*.pptx binary
+*.exe binary
+
+# etalement.script and etalement.urp line-ending policy is owned by a
+# separate, already-scoped fix (F2 and F10 in
+# docs/superpower/plans/erreur_hors_datalogger.md): deliberately no rule for
+# *.script or *.urp here, and no `git add --renormalize` in this change, so
+# this commit does not rewrite those tracked artifacts out from under that
+# task.
