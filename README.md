@@ -25,7 +25,9 @@ Two cooperating Python tools plus the generated on-robot artifacts:
   Paramètres button opens a settings window covering the protocol's tunable variables;
   operator overrides are kept in `etalement_settings.json` (gitignored, specific to one
   workstation and one trial), with a versioned example at
-  `etalement_settings.example.json`.
+  `etalement_settings.example.json`. The configuration of the trial of record is a separate,
+  versioned file, `etalement_trial.json`, from which `--export-trial` regenerates
+  `etalement.script` byte for byte.
 - **`ur5_sim/`** - offline validator and replay. Parses `etalement.script`, runs
   sequential IK against a UR5 model, reports failures, and (with `--visualize`) renders
   the robot in Swift (WebGL) alongside matplotlib panels (XYZ vs time, XY trail, IK
@@ -115,6 +117,8 @@ python ur5_etalementv6.py --export        # write etalement.script
 python ur5_etalementv6.py --export-urp    # write etalement.urp
 python ur5_etalementv6.py --no-show       # headless
 python ur5_etalementv6.py --export --force  # overwrite a hand-edited output file
+python ur5_etalementv6.py --export-trial --no-show --force
+                                          # regenerate the trial of record
 ```
 
 The design window's Paramètres button opens the settings editor described below. The
@@ -126,6 +130,19 @@ workstation and one trial); a versioned example lives at
 Enregistrer/Exporter buttons in the settings window) refuse to overwrite an output file
 whose content has drifted from the last recorded export - a `.urp` retouched by hand on
 the pendant, for instance - unless `--force` is passed.
+
+Every generated file opens with a "RECETTE DE REPRODUCTION" header stating what produced
+it: how many cycles, and for each one its type, its waypoint count and its label, then any
+setting that differs from the `design/params.py` defaults, then a short fingerprint. The
+header deliberately carries no date. A timestamp would make each export differ from the
+last for no reason anyone cares about, and git already records when a file changed; what
+was missing was what the file was made of.
+
+The committed `etalement.script` is the trial of record, the program that ran on the robot.
+It comes from the interface export path rather than the headless one, and the configuration
+that produced it is written down in the versioned `etalement_trial.json`, so
+`--export-trial` reproduces it byte for byte. Do not confuse that file with
+`etalement_settings.json`, which holds one workstation's overrides and stays gitignored.
 
 ## Settings
 

@@ -28,7 +28,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 
-from design.export import _build_urscript_lines, _settings_header_lines
+from design.export import (
+    _build_urscript_lines,
+    _recipe_header_lines,
+    _settings_header_lines,
+)
 from design.settings import Settings, set_settings
 from design.settings_spec import SPECS
 from design.trajectory import build_full_trajectory
@@ -97,26 +101,40 @@ class IdentityTests(unittest.TestCase):
         expected = GOLDEN.read_text(encoding="utf-8")
         self.assertEqual(produced, expected)
 
-    def test_traceability_block_is_absent_when_nothing_is_overridden(self):
-        # Le bloc de la phase 6 ne doit pas polluer une sortie aux defauts :
-        # sa date et son empreinte varient par construction et casseraient
-        # l'identite octet pour octet.
+    def test_deviation_list_is_empty_when_nothing_is_overridden(self):
+        # Seule la LISTE DES ECARTS est conditionnelle : un export aux defauts
+        # n'a rien a lister. La recette, elle, est emise dans tous les cas
+        # (F10) ; c'est ce que verifie le test suivant.
         self.assertEqual(_settings_header_lines(Settings()), [])
 
-    def test_traceability_block_lists_the_deviation(self):
+    def test_deviation_list_names_the_change(self):
         s = Settings()
         s.force_z_target = 8.0
         block = "\n".join(_settings_header_lines(s))
         self.assertIn("FORCE_Z_TARGET", block)
         self.assertIn("6.0 -> 8.0", block)
-        self.assertIn(s.fingerprint(), block)
 
-    def test_traceability_block_appears_in_the_script(self):
-        s = Settings()
-        s.force_z_target = 8.0
-        script = _script_at(s)
-        self.assertIn("=== REGLAGES UTILISES ===", script)
+    def test_recipe_block_is_emitted_even_at_pure_defaults(self):
+        # Le coeur de F10 : sans cette garantie, l'export le plus courant est
+        # justement celui qui ne dit rien de ce qui l'a produit.
+        script = _script_at(Settings())
+        self.assertIn("=== RECETTE DE REPRODUCTION ===", script)
         self.assertIn("empreinte des reglages", script)
+
+    def test_recipe_block_carries_no_date(self):
+        # Une date rendrait tout export non reproductible, ce qui avait force
+        # a rendre le bloc conditionnel. Elle ne doit pas revenir.
+        block = "\n".join(_recipe_header_lines([], Settings()))
+        self.assertNotIn("genere le", block)
+
+    def test_recipe_block_states_the_cycle_configuration(self):
+        s = Settings()
+        cycles = build_full_trajectory()
+        block = "\n".join(_recipe_header_lines(cycles, s))
+        self.assertIn(f"cycles : {len(cycles)}", block)
+        for cyc in cycles:
+            self.assertIn(cyc["label"], block)
+        self.assertIn(s.fingerprint(), block)
 
 
 class UsesSettingsTests(unittest.TestCase):

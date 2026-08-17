@@ -119,13 +119,9 @@ def _settings_header_lines(settings: Settings) -> list[str]:
     """
     --------------------------------------------------------------------------
     Purpose:
-        Bloc de tracabilite des reglages, insere dans l'en-tete du script et du
-        .urp. Exigence de protocole experimental : savoir avec quelles valeurs
-        un essai a ete produit.
-
-        Retourne une liste VIDE quand rien n'est surcharge, pour qu'une sortie
-        aux defauts reste identique octet pour octet a la reference : la date
-        et l'empreinte varient par construction.
+        Partie « ecarts aux defauts » de l'en-tete de recette. Conservee
+        separement de _recipe_header_lines parce qu'elle est la seule partie
+        conditionnelle : un export aux defauts n'a rien a lister.
 
     Inputs:
         settings (Settings): reglages effectifs de l'export.
@@ -137,23 +133,58 @@ def _settings_header_lines(settings: Settings) -> list[str]:
     overrides = settings.to_overrides()
     if not overrides:
         return []
-    from datetime import datetime
-
-    source = settings.source
-    lines = [
-        '# === REGLAGES UTILISES ===',
-        f'# genere le {datetime.now().strftime("%Y-%m-%d %H:%M")}, '
-        f'source : {source}',
-        '# valeurs modifiees par rapport aux defauts :',
-    ]
+    lines = ['# reglages differents des defauts de design/params.py :']
     by_name = {spec.name: spec for spec in SPECS}
     for name in sorted(overrides):
         spec = by_name[name]
-        default = getattr(__import__('design.params', fromlist=['x']),
-                          spec.const)
+        default = getattr(params, spec.const)
         lines.append(
             f'#   {spec.const:<28} {default} -> {overrides[name]} '
             f'{spec.unit}'.rstrip())
+    return lines
+
+
+def _recipe_header_lines(cycles: list[dict], settings: Settings) -> list[str]:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Recette de reproduction, emise dans TOUT export (F10,
+        docs/superpower/plans/erreur_hors_datalogger.md). Un fichier doit dire
+        ce qui l'a produit, sinon personne ne peut regenerer le programme qui a
+        mene un essai, ni verifier que l'artefact et le code s'accordent encore.
+
+        Le bloc etait auparavant conditionnel aux ecarts aux defauts, et
+        portait un horodatage. C'etait l'horodatage le probleme, pas le
+        contenu : non deterministe, il cassait la comparaison octet pour octet
+        d'une sortie nominale, ce qui a impose de n'emettre le bloc que
+        rarement, donc de ne rien tracer dans le cas le plus courant. La date
+        est donc retiree, git et le CSV d'acquisition la portent deja, et le
+        bloc devient deterministe, donc emis toujours et verifiable par un
+        test. Un fichier qui dit ce qui l'a produit vaut mieux qu'un fichier
+        qui dit quand il l'a ete.
+
+    Inputs:
+        cycles (list[dict]): cycles tels que passes au generateur.
+        settings (Settings): reglages effectifs de l'export.
+
+    Outputs:
+        lines (list[str]): lignes de commentaire URScript, jamais vide.
+    --------------------------------------------------------------------------
+    """
+    lines = [
+        '# === RECETTE DE REPRODUCTION ===',
+        '# Ce bloc enonce ce qui a produit ce fichier. Il ne porte pas de date :',
+        '# une date rendrait l export non reproductible, et git la porte deja.',
+        f'# cycles : {len(cycles)}',
+    ]
+    for idx, cyc in enumerate(cycles, start=1):
+        n_wp = len(cyc.get('waypoint_indices')
+                   if cyc.get('waypoint_indices') is not None
+                   else get_waypoint_indices(len(cyc['pts']), cyc['type']))
+        lines.append(
+            f'#   cycle {idx} : type={cyc["type"]:<8} waypoints={n_wp:<5} '
+            f'label={cyc["label"]}')
+    lines += _settings_header_lines(settings)
     lines.append(f'# empreinte des reglages : {settings.fingerprint()}')
     lines.append('#')
     return lines
@@ -225,7 +256,7 @@ def _build_urscript_lines(cycles: list[dict],
         '# Genere automatiquement par ur5_etalement.py',
         '# IMPORTANT : calibrer ROBOT_X_ORIGIN, ROBOT_Y_ORIGIN, ROBOT_Z_SURFACE avant execution',
         '#',
-        *_settings_header_lines(s),
+        *_recipe_header_lines(cycles, s),
         '# === PINCE 2F-85 : AUCUN ACTIONNEMENT ===',
         '# Ce programme n a pas de commande de pince. La 2F-85 est un support',
         '# passif pour le doigt silicone ; seule sa longueur (TCP_GRIPPER_Z=145 mm)',

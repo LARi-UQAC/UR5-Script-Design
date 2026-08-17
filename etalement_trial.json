@@ -1,0 +1,23 @@
+{
+  "_comment": [
+    "Configuration de l'essai de reference : ce qui a produit etalement.script.",
+    "Recuperee le 2026-08-16 par inversion des poses du fichier commite, puis",
+    "verifiee par reproduction octet pour octet. Voir F10 dans",
+    "docs/superpower/plans/erreur_hors_datalogger.md.",
+    "Regenerer avec : python ur5_etalementv6.py --export-trial --no-show",
+    "Ce fichier est versionne, contrairement a etalement_settings.json qui",
+    "porte les reglages de poste et reste gitignore."
+  ],
+  "target": "etalement.script",
+  "circular": {
+    "rotations_deg": [0, 90, 0],
+    "points_per_cycle": 200,
+    "label_template": "Cycle {n} - Circulaire (UI)"
+  },
+  "linear": {
+    "shape": "triangular",
+    "rotations_deg": [0, 90, 0],
+    "label_template": "Cycle {n} - Triangulé ({rot}deg)"
+  },
+  "settings_overrides": {}
+}

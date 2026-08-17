@@ -2,6 +2,18 @@
 # Genere automatiquement par ur5_etalement.py
 # IMPORTANT : calibrer ROBOT_X_ORIGIN, ROBOT_Y_ORIGIN, ROBOT_Z_SURFACE avant execution
 #
+# === RECETTE DE REPRODUCTION ===
+# Ce bloc enonce ce qui a produit ce fichier. Il ne porte pas de date :
+# une date rendrait l export non reproductible, et git la porte deja.
+# cycles : 6
+#   cycle 1 : type=circular waypoints=200   label=Cycle 1 - Circulaire (UI)
+#   cycle 2 : type=circular waypoints=200   label=Cycle 2 - Circulaire (UI)
+#   cycle 3 : type=circular waypoints=200   label=Cycle 3 - Circulaire (UI)
+#   cycle 4 : type=linear   waypoints=14    label=Cycle 4 - Triangulé (0deg)
+#   cycle 5 : type=linear   waypoints=14    label=Cycle 5 - Triangulé (90deg)
+#   cycle 6 : type=linear   waypoints=14    label=Cycle 6 - Triangulé (0deg)
+# empreinte des reglages : 44136fa
+#
 # === PINCE 2F-85 : AUCUN ACTIONNEMENT ===
 # Ce programme n a pas de commande de pince. La 2F-85 est un support
 # passif pour le doigt silicone ; seule sa longueur (TCP_GRIPPER_Z=145 mm)

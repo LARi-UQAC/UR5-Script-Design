@@ -26,7 +26,13 @@ UR5_SIM_DIR = REPO_ROOT / "ur5_sim"
 # committed etalement.script should be). .gitattributes carries no rule for
 # them on purpose, so they are the one documented exception to "every
 # extension actually tracked is matched by some rule" below.
-_EOL_POLICY_DEFERRED_EXTENSIONS = {".script", ".urp"}
+# F10 a tranche le cas de .script le 2026-08-16 : la regle est desormais
+# `*.script text eol=lf`, parce que les tests de reproductibilite comparent une
+# chaine generee au fichier suivi octet pour octet, et que core.autocrlf=true
+# rendrait cette comparaison fausse sur un clone Windows neuf. Seul .urp reste
+# en attente : il est retouche a la main par l'operateur, donc le renormaliser
+# est une decision d'operateur, pas un effet de bord.
+_EOL_POLICY_DEFERRED_EXTENSIONS = {".urp"}
 
 # Comments that point at another file for context, in either language this
 # repo mixes ("see ...", "cf. ...", "voir ..."), followed by something that

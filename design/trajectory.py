@@ -50,6 +50,39 @@ def get_waypoint_indices(total_pts_count: int, cycle_type: str) -> list[int]:
     )))
 
 
+def resample_points(pts: np.ndarray, n_points: int) -> np.ndarray:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Re-echantillonne un trace sur la distance curviligne, pour un pas
+        spatial uniforme. Vit ici et non dans design/app.py parce que la
+        regeneration headless de l'essai de reference en depend, et qu'importer
+        l'interface pour l'obtenir tirerait matplotlib et son backend (F10).
+
+    Inputs:
+        pts (np.ndarray): trace (N, 3) en coordonnees plaque.
+        n_points (int): nombre de points voulus, au moins 2.
+
+    Outputs:
+        resampled (np.ndarray): trace (n_points, 3).
+    --------------------------------------------------------------------------
+    """
+    n_points = max(2, int(n_points))
+    deltas = np.diff(pts[:, :2], axis=0)
+    seg_len = np.sqrt((deltas ** 2).sum(axis=1))
+    s = np.concatenate(([0.0], np.cumsum(seg_len)))
+    keep = np.concatenate(([True], np.diff(s) > 1e-12))
+    s_u = s[keep]
+    pts_u = pts[keep]
+    if len(s_u) < 2 or s_u[-1] <= 1e-12:
+        return np.repeat(pts_u[:1], n_points, axis=0)
+    s_target = np.linspace(0.0, s_u[-1], n_points)
+    x = np.interp(s_target, s_u, pts_u[:, 0])
+    y = np.interp(s_target, s_u, pts_u[:, 1])
+    z = np.interp(s_target, s_u, pts_u[:, 2])
+    return np.column_stack((x, y, z))
+
+
 def rotate_points(
     pts: np.ndarray,
     angle_deg: float,

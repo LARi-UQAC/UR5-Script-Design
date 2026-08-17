@@ -35,9 +35,14 @@
 *.pptx binary
 *.exe binary
 
-# etalement.script and etalement.urp line-ending policy is owned by a
-# separate, already-scoped fix (F2 and F10 in
-# docs/superpower/plans/erreur_hors_datalogger.md): deliberately no rule for
-# *.script or *.urp here, and no `git add --renormalize` in this change, so
-# this commit does not rewrite those tracked artifacts out from under that
-# task.
+# Generated URScript. Settled by F10 on 2026-08-16, the fix that owned this
+# question. `_write_export` emits LF, the UR controller reads the file on
+# Linux, and the reproducibility tests compare a generated string against the
+# tracked file byte for byte. Without this rule `core.autocrlf=true` hands a
+# Windows clone a CRLF copy, and those tests fail on a fresh checkout for a
+# reason that has nothing to do with the code under test.
+*.script text eol=lf
+
+# etalement.urp keeps no rule yet, on purpose. It is hand-tuned by the
+# operator for robot trials, so renormalising it rewrites an artifact that
+# nobody generated; that is an operator decision, not a side effect of F10.

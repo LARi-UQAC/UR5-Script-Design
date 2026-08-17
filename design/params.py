@@ -39,8 +39,13 @@ Z_RETREAT_END: float = 30.0  # mm — remontée finale en Z (monde) après tous 
 # =============================================================================
 N_CIRCULAR_CYCLES: int = 3
 CIRC_N_PASSES: int = 4
-CIRC_N_CIRCLES: int = 20
-CIRC_R_CIRCLE: float = 5.0    # mm — rayon de chaque petit cercle
+# CIRC_N_CIRCLES et CIRC_R_CIRCLE valaient 20 et 5.0 jusqu'au 2026-08-16. La
+# reproduction octet pour octet de etalement.script (F10) a montre que l'essai
+# de reference avait tourne avec 8 et 7.3 : les defauts du code ne decrivaient
+# donc pas le protocole reellement execute. Alignes sur l'essai par decision de
+# l'operateur. Voir docs/superpower/plans/erreur_hors_datalogger.md, F10.
+CIRC_N_CIRCLES: int = 8
+CIRC_R_CIRCLE: float = 7.3    # mm — rayon de chaque petit cercle
 CIRC_Y_START: float = 5.0     # mm — Y du point de départ/arrivée
 CIRC_SPEED: float = 36.0      # mm/s — vitesse robot
 CIRC_DURATION: float = 11.0   # sec — durée cible par cycle

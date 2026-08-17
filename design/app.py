@@ -33,12 +33,14 @@ from design.export import (
     generate_urscript_acq,
 )
 from design.live_ipc import build_ipc_overlay
-from design.settings import get_settings, startup_banner
+from design.settings import get_settings, set_settings, startup_banner
+from design.trial_config import build_trial_cycles, load_trial_config
 from design.trajectory import (
     build_full_trajectory,
     circular_cycle,
     get_waypoint_indices,
     linear_cycle,
+    resample_points,
     triangular_cycle,
 )
 
@@ -79,22 +81,10 @@ def draw_validation_grid(ax) -> None:
             idx += 1
 
 
-def _resample_points(pts: np.ndarray, n_points: int) -> np.ndarray:
-    """Ré-échantillonne sur la distance curviligne pour un pas spatial uniforme."""
-    n_points = max(2, int(n_points))
-    deltas = np.diff(pts[:, :2], axis=0)
-    seg_len = np.sqrt((deltas ** 2).sum(axis=1))
-    s = np.concatenate(([0.0], np.cumsum(seg_len)))
-    keep = np.concatenate(([True], np.diff(s) > 1e-12))
-    s_u = s[keep]
-    pts_u = pts[keep]
-    if len(s_u) < 2 or s_u[-1] <= 1e-12:
-        return np.repeat(pts_u[:1], n_points, axis=0)
-    s_target = np.linspace(0.0, s_u[-1], n_points)
-    x = np.interp(s_target, s_u, pts_u[:, 0])
-    y = np.interp(s_target, s_u, pts_u[:, 1])
-    z = np.interp(s_target, s_u, pts_u[:, 2])
-    return np.column_stack((x, y, z))
+# Le reechantillonneur vit desormais dans design/trajectory.py : la
+# regeneration headless de l'essai de reference en a besoin, et importer
+# design/app.py pour l'obtenir tirerait matplotlib et son backend (F10).
+_resample_points = resample_points
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +487,9 @@ def main() -> int:
     parser.add_argument('--no-show', action='store_true', help='Ne pas afficher les graphiques')
     parser.add_argument('--force', action='store_true',
                         help='Ecraser un fichier de sortie retouche a la main')
+    parser.add_argument('--export-trial', action='store_true',
+                        help="Regenerer l'essai de reference decrit par "
+                             "etalement_trial.json (voir F10)")
     args = parser.parse_args()
 
     # Bannière des réglages actifs : d'où ils viennent et en quoi ils
@@ -504,8 +497,30 @@ def main() -> int:
     for line in startup_banner(get_settings()):
         print(line)
 
-    cycles = build_full_trajectory()
     exit_code = 0
+
+    if args.export_trial:
+        # L'essai de reference se rejoue depuis son fichier de configuration,
+        # avec SES reglages, jamais ceux du poste : sinon regenerer un essai
+        # donnerait un resultat different d'une machine a l'autre.
+        # build_trial_cycles installe ces reglages comme reglages de processus,
+        # parce que les generateurs et les conversions de repere lisent le
+        # singleton et non un argument (voir trial_config.activate_trial). On
+        # restaure ensuite ceux du poste, sinon la figure et un export suivant
+        # hériteraient des reglages de l'essai.
+        previous = get_settings()
+        try:
+            cfg = load_trial_config()
+            trial_cycles = build_trial_cycles(cfg)
+            if not generate_urscript(trial_cycles, settings=get_settings(),
+                                     force=args.force):
+                exit_code = 1
+        finally:
+            set_settings(previous)
+        if args.no_show:
+            return exit_code
+
+    cycles = build_full_trajectory()
 
     if args.export:
         # Jumeau acquisition : tente uniquement si l'original a reussi

@@ -2,18 +2,22 @@
 
 ## What is left to do (read this first)
 
-Status at 2026-08-16, branch `feat/acq-datalogger` pushed at commit `fb54a4f`. Eleven of the
-fifteen entries are fixed and verified; **four remain**, and they are the only ones. Each
-line says who it waits on and why, so nobody has to read the whole file to find the work.
+Status at 2026-08-16, on `main`. Twelve of the fifteen entries are fixed and verified;
+**three remain**, and they are the only ones. Each line says who it waits on and why, so
+nobody has to read the whole file to find the work.
+
+F10 closed on 2026-08-16. Its configuration turned out to be recoverable rather than lost:
+the committed `etalement.script` was reproduced byte for byte, its recipe is now emitted in
+every export, and the two `design/params.py` defaults that did not match the trial were
+aligned on it. Read the F10 entry before touching export or the golden fixture.
 
 | # | Sev. | Model | What is left | Waits on |
 |---|---|---|---|---|
 | **F15** | Low | **Sonnet**, the specification is already written; Opus reviews the diff and runs the harness | The only entry still fully open. `csv_open()` picks a free name with `file_exists()` then opens it with `fopen(..., "wb")`, which creates **or truncates**: another writer taking the name in that gap loses its file silently. Correction and four test cases are written out in the entry, including that it must compose with F14 rather than replace it. | A session with budget for a careful C change. Deliberately not rushed: it rewrites the file-creation path of the only data recorder. |
-| **F10** | Medium | **Opus** decides what the header must carry, then **Sonnet** emits it, regenerates the golden fixture and updates the tests | **Half done.** The decision was taken (the committed `etalement.script` stays the trial-of-record, and export verification is pinned to `tests/fixtures/golden_headless.script` instead of to it). The other half is not: no export yet states the cycle configuration that produced it, so no artifact can be reproduced or matched to a trial. That blind spot is exactly what let F11 ship unnoticed. | A decision on what the emitted header should carry, then the header change and a regenerated golden fixture in one deliberate commit. Interacts with F2 and F9 on line endings. |
 | **F6** | Low | **Opus.** Naming the seam is a module-boundary judgement on a file no test covers, and the result is only checkable by launching the viewer | `ur5_sim/visualization/viewer.py` is 916 lines, over the workspace file-size ceiling that `spec_rtde_emulator.md` itself claims to respect. Deferred by operator decision on 2026-08-16, not skipped. | The session implementing `plan_rtde_emulator.md` task 6, which must reopen this file anyway to add PAUSE, and which will have a way to exercise the viewer end to end. Splitting it twice would be two risky passes on an untested GUI file. |
 | **F7** | Low | Whatever `plan_rtde_emulator.md` task 6 assigns; do not re-decide it here | `paused_sim_t` is dead (written `0.0` everywhere, read twice) and no PAUSE exists in the viewer. Not to be fixed here. | Already scheduled as task 6 of `plan_rtde_emulator.md`. Listed only so this audit is complete; opening a second correction would duplicate it. |
 
-Everything else - F1 to F5, F8, F9, F11 to F14 - is corrected, with tests, and verified by a
+Everything else - F1 to F5, F8 to F14 - is corrected, with tests, and verified by a
 full run: 198 Python tests, 275 C checks, `python -m ur5_sim --check` clean, `pip-audit`
 clean.
 
@@ -402,14 +406,45 @@ twice.
 
 ---
 
-## F10. The committed `etalement.script` cannot be reproduced by any documented command (Medium) - HALF DONE
+## F10. The committed `etalement.script` cannot be reproduced by any documented command (Medium) - FIXED
 
-**Status: HALF DONE.** The decision half is settled: the committed artifact stays the
-trial-of-record, and export verification now compares against
-`tests/fixtures/golden_headless.script` rather than against it. The traceability half is
-not: no export states the cycle configuration that produced it, so the original problem -
-nobody can regenerate the file that ran a given trial - is still there. F11 is what that
-blind spot costs.
+**Status: FIXED on 2026-08-16.** Both halves are closed, and the configuration turned out to
+be recoverable rather than lost, which changed what the fix could be.
+
+**What the configuration was.** The committed artifact was reproduced byte for byte from
+`circ_r_circle = 7.3`, `circ_n_circles = 8`, `circ_n_passes = 4`, 200 points per circular
+cycle all emitted, and cycles 4 to 6 in triangular rather than rectilinear shape. It was
+recovered by inverting the first waypoint back into the plate frame, where `x0 = 2R` gives
+the radius directly and `y0` gives `CIRC_Y_START`, then searching the two remaining integers
+exhaustively. Residual error 0.0023 mm, which is the six-decimal rounding of the emitted
+poses. That configuration now lives in `etalement_trial.json`, versioned, and
+`python ur5_etalementv6.py --export-trial --no-show` regenerates the artifact from it.
+
+**The finding that outlived the defect.** Two `design/params.py` defaults did not describe
+the protocol that actually ran: the radius was 5.0 in the code against 7.3 in the trial, and
+the circle count 20 against 8. Nobody could have noticed while no export stated its own
+configuration, which is the same blind spot in another form. Aligned on the trial by operator
+decision on 2026-08-16.
+
+**What the header now carries.** The root cause of the conditional block was the timestamp,
+not the content. A date makes an export non-reproducible, which is why the block could only
+be emitted when a setting deviated, which in turn meant the most common export - the one at
+pure defaults - recorded nothing at all. The date is therefore gone, git and the acquisition
+CSV already carry it, and `_recipe_header_lines` emits a deterministic recipe in every
+export: cycle count, then per cycle its type, waypoint count and label, then the deviations
+from defaults when there are any, then the settings fingerprint. A file that states what
+produced it is worth more than a file that states when.
+
+**Consequences carried out in the same commit**, as this entry required. `etalement.script`
+was regenerated with the recipe header and LF endings, its trajectory verified unchanged
+against the previous artifact line for line. `tests/fixtures/golden_headless.script` was
+regenerated at the new defaults. `resample_points` moved from `design/app.py` to
+`design/trajectory.py`, because regenerating a trial headlessly must not import matplotlib.
+
+**What follows below** is the original entry, kept because it states the reasoning that led
+here.
+
+---
 
 **Where.** `etalement.script` at the repo root, tracked, 817 lines and 113 131 bytes.
 `python ur5_etalementv6.py --export --no-show` produces 502 lines and 61 366 characters
