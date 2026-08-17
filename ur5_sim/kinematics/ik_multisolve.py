@@ -24,8 +24,9 @@ from ur5_sim.kinematics.transforms import tcp_tool_offset
 # joints at two levels each (2^4 = 16 seeds) and holding the rest mid-range
 # covers every branch with margin, while a full 3^6 = 729-seed grid spent ~700
 # extra Levenberg-Marquardt solves discovering nothing new (the dominant cost of
-# the first viewer launch). See ../../tcp_live trajectory cache for the second
-# half of that launch-time fix.
+# the first viewer launch). See ur5_sim/ipc_config.py for the UDP loopback IPC
+# that replaced the retired tcp_live/tcp_live.json file cache, the second half
+# of that launch-time fix.
 _BRANCH_JOINTS: tuple[int, ...] = (0, 1, 2, 4)
 _BRANCH_LEVELS: tuple[float, ...] = (0.25, 0.75)
 _MID_LEVEL: float = 0.5

@@ -118,8 +118,9 @@ def visualize(
         Optional list aligned with the trajectory length, containing the
         1-based index of the URScript cycle each frame belongs to
         (``0`` for frames that fall outside any ``def cycle_N():`` block).
-        When provided, the viewer publishes a live TCP status to
-        ``tcp_live.json`` for cross-process consumption by the design UI.
+        When provided, the viewer publishes a live TCP status to the design
+        UI over UDP loopback (``ur5_sim/ipc_config.py``, 127.0.0.1:47811).
+        The ``tcp_live.json`` file exchange this once used is retired.
     surface:
         Optional surface frame returned by
         :func:`ur5_sim.visualization.surface.compute_surface_frame`. When
@@ -268,7 +269,7 @@ def visualize(
             )
         )
 
-    # 9-point test pattern (cf. meshes/TestMeasure.PNG). Marks are drawn
+    # 9-point test pattern (cf. meshes/TestMeasure.png). Marks are drawn
     # as static circles on top of the plate polygon so the operator can
     # see the live trajectory crossing each measurement point.
     if surface is not None:

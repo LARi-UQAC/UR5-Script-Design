@@ -38,7 +38,7 @@ python -m ur5_sim --visualize --identity
 
 # Design UI (also re-exports etalement.script and .urp)
 python ur5_etalementv6.py
-python ur5_etalementv6.py --export        # write etalement.script
+python ur5_etalementv6.py --export        # write etalement.script + etalement_acq.script
 python ur5_etalementv6.py --export-urp    # write etalement.urp
 python ur5_etalementv6.py --no-show       # CI-friendly, headless
 python ur5_etalementv6.py --export --force  # overwrite an output file retouched by hand
@@ -51,6 +51,12 @@ python -m unittest tests.test_surface_constraint.SurfaceFrameTests.test_snap_pro
 # RTDE fallback monitor (C, not collected by unittest discovery) - needs MinGW-w64 gcc
 datalogger\tests\build_and_run_tests.bat
 datalogger\build.bat                       # produce rtde_fallback_monitor.exe
+
+# Acquisition logger, on-robot main path (etalement_acq.script + daemon)
+python datalogger\acq_logger_daemon.py     # daemon, as it runs on the controller
+python datalogger\acq_emulator.py --ft     # fake FT-300 on 63351 (dev machine)
+python datalogger\acq_emulator.py --robot etalement.script --samples 200
+                                           # fake robot: replays real poses at 50 Hz
 
 # Dependency audit (CLAUDE rule from parent dir)
 pip-audit -r requirements.txt
@@ -144,7 +150,9 @@ Stdlib `unittest`, no `conftest.py`, no pytest plugins. Tests live in `tests/`:
 
 **Invariant.** Never `from design.params import X` in a module that must see the operator's settings: `from X import Y` binds the value at import time, so a later edit through the settings window has no effect on the name already bound. Read `s = get_settings()` then `s.<field>` at the point of use instead. Exempt: paths (`SCRIPT_PATH`, `URP_PATH`) and constants not exposed in `design/settings_spec.SPECS` (`Z_CONTACT`, `LIN_N_PASSES`, `LIN_N_POINTS_PER_SEGMENT`, `N_LINEAR_CYCLES`, `TCP_X`, `TCP_Y`). See ARCHITECTURE.md, section 8.
 
-**C-language exception.** `datalogger/` holds the RTDE fallback monitor, a standalone tool for a lab computer that has no Python and where nothing can be installed (isolated VLAN, no internet), so both the tool and its tests are C. `datalogger/tests/test_rtde_fallback_monitor.c` includes the tool's single translation unit with its `main()` compiled out, so it calls the real functions instead of shelling out. It is not collected by `unittest discover`; run `datalogger\tests\build_and_run_tests.bat` (needs MinGW-w64 `gcc` on `PATH`). It covers big-endian decoding against known byte sequences, every ordered `runtime_state` transition pair, the 20 ms decimation grid, the CSV schema, and an integration layer replaying the RTDE handshake from a fake server on loopback. `datalogger/` is fully standalone: it reads and writes nothing belonging to `etalement*.script`, `etalement*.urp`, `ur5_sim` or the design UI.
+**C-language exception.** `datalogger/` holds the RTDE fallback monitor, a standalone tool for a lab computer that has no Python and where nothing can be installed (isolated VLAN, no internet), so both the tool and its tests are C. `datalogger/tests/test_rtde_fallback_monitor.c` includes the tool's single translation unit with its `main()` compiled out, so it calls the real functions instead of shelling out. It is not collected by `unittest discover`; run `datalogger\tests\build_and_run_tests.bat` (needs MinGW-w64 `gcc` on `PATH`). It covers big-endian decoding against known byte sequences, every ordered `runtime_state` transition pair, the 20 ms decimation grid, the CSV schema, and an integration layer replaying the RTDE handshake from a fake server on loopback. `datalogger/` is fully standalone and **exclusively C**: it reads and writes nothing belonging to `etalement*.script`, `etalement*.urp`, `ur5_sim` or the design UI. Nothing Python belongs in that folder; the on-robot acquisition path lives in `onrobot/` for exactly that reason.
+
+**`onrobot/` — the on-controller acquisition path (Python).** `acq_logger_daemon.py` receives 50 Hz samples from `etalement_acq.script` over loopback port 50100, merges the Robotiq FT-300 stream from port 63351, and writes `ACQ_log_*.csv` to the USB key on `STOP`. `urmagic_acqlogger.sh` is the UR magic file that launches it as root when the key is inserted. `acq_emulator.py` is a development-machine tool (fake FT-300 plus a fake robot replaying `etalement.script`) and never ships to the robot. The daemon is Python 2.7 compatible, imports the standard library and nothing else, and is loaded by path in `tests/test_acq_logger_daemon.py` (which IS collected by `unittest discover`, unlike the C harness) because it is copied alone onto a USB key. See ARCHITECTURE.md, sections 2 and 8.
 
 No CI; run them locally before pushing changes that touch parsing, transforms, export, or the surface module.
 

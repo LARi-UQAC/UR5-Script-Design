@@ -153,15 +153,30 @@ class Settings:
         ----------------------------------------------------------------------
         Purpose:
             Construit des reglages a partir des defauts, puis applique les
-            surcharges du JSON s'il existe. Une cle inconnue est ignoree, un
-            fichier illisible ramene aux defauts : l'interface ne doit jamais
-            se fermer sur un fichier abime a la main.
+            surcharges du JSON s'il existe, et valide le resultat (F1,
+            docs/superpower/plans/erreur_hors_datalogger.md). Une cle
+            inconnue est ignoree ; un fichier illisible OU dont au moins un
+            champ ne passe pas validate() ramene aux DEFAUTS PURS, jamais un
+            melange partiel : un fichier qui n'applique que la moitie de ses
+            surcharges est pire que les deux extremes, car rien dans l'en-
+            tete exporte ne dit laquelle a passe. Chaque champ fautif est
+            imprime (WARN, nommant le champ, sa valeur et ses bornes), suivi
+            d'une ligne resumant le refus.
+
+            Deverrouillage transitoire de calibration pour la seule duree de
+            cette validation : une surcharge de calibration ECRITE DANS LE
+            FICHIER est deja l'action explicite que l'onglet verrouille
+            demande normalement a l'IHM (un hand-edit ne peut pas venir d'un
+            clic accidentel). L'objet retourne repart neanmoins verrouille
+            (calibration_unlocked = False), conformement a la regle "une
+            session repart toujours verrouillee" ; seules les bornes de
+            chaque champ de calibration restent opposables.
 
         Inputs:
             path (Path | str): chemin du fichier de surcharges.
 
         Outputs:
-            settings (Settings): reglages effectifs.
+            settings (Settings): reglages effectifs, toujours valides.
         ----------------------------------------------------------------------
         """
         s = cls()
@@ -171,7 +186,9 @@ class Settings:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             overrides = payload.get("overrides", {})
-        except (json.JSONDecodeError, OSError, AttributeError):
+            if not isinstance(overrides, dict):
+                raise TypeError("'overrides' doit etre un objet JSON")
+        except (json.JSONDecodeError, OSError, AttributeError, TypeError):
             print(f"WARN: {path.name} illisible, retour aux defauts.")
             return s
         known = {spec.name for spec in SPECS}
@@ -179,6 +196,16 @@ class Settings:
             if name in known:
                 setattr(s, name, value)
         s.source = str(path)
+
+        s.calibration_unlocked = True
+        errors = s.validate()
+        s.calibration_unlocked = False
+        if errors:
+            for err in errors:
+                print(f"WARN: {path.name} : {err}")
+            print(f"WARN: {path.name} refuse ({len(errors)} champ(s) hors "
+                  f"norme) : retour aux defauts.")
+            return cls()
         return s
 
     def save(self, path: Path | str = SETTINGS_PATH) -> None:
@@ -216,6 +243,16 @@ class Settings:
             Controle dur. Un message par champ fautif, nommant le champ et ses
             bornes. Liste vide quand tout passe.
 
+            Type et forme sont verifies AVANT tout calcul qui suppose la
+            bonne forme (F1, docs/superpower/plans/erreur_hors_datalogger.md).
+            Un champ de type liste (p_ref, q_safe_joints_rad,
+            probe_points_plate_mm) recevant une valeur non iterable (null,
+            scalaire) ou de la mauvaise longueur est refuse ici, avant le
+            calcul de `changed` : `list(None)` ou `list(0.5)` leverait sinon
+            un TypeError brut, exactement celui que to_overrides() leve plus
+            loin dans la chaine (export, fingerprint, save) quand ce controle
+            n'a pas encore eu lieu.
+
         Outputs:
             errors (list[str]): messages d'erreur destines a l'operateur.
         ----------------------------------------------------------------------
@@ -224,8 +261,21 @@ class Settings:
         for spec in SPECS:
             value = getattr(self, spec.name)
             default = _default(spec.const)
-            changed = (list(value) != list(default)
-                       if isinstance(default, (list, tuple))
+            is_sequence = isinstance(default, (list, tuple))
+
+            if is_sequence:
+                if not isinstance(value, (list, tuple)):
+                    errors.append(
+                        f"{spec.name} : attendu une liste de {len(default)} "
+                        f"valeur(s) ({spec.label}), recu {value!r}.")
+                    continue
+                if len(value) != len(default):
+                    errors.append(
+                        f"{spec.name} : {len(value)} valeur(s) recue(s), "
+                        f"{len(default)} attendue(s) ({spec.label}).")
+                    continue
+
+            changed = (list(value) != list(default) if is_sequence
                        else value != default)
 
             if not spec.editable and changed:
@@ -248,7 +298,31 @@ class Settings:
                         f"{spec.name} : le choix '{value}' est documente mais "
                         f"indisponible. {spec.note}".strip())
                 continue
-            if spec.kind in ("points", "vector"):
+            if spec.kind == "points":
+                # Chaque element doit etre un couple (x, y) numerique. La
+                # forme et la longueur globales sont deja assurees ci-dessus.
+                for i, point in enumerate(value):
+                    if not isinstance(point, (list, tuple)) or len(point) != 2:
+                        errors.append(
+                            f"{spec.name}[{i}] : attendu un couple (x, y), "
+                            f"recu {point!r}.")
+                        continue
+                    for coord in point:
+                        try:
+                            float(coord)
+                        except (TypeError, ValueError):
+                            errors.append(
+                                f"{spec.name}[{i}] : coordonnee {coord!r} "
+                                f"n'est pas un nombre.")
+                continue
+            if spec.kind == "vector":
+                for i, component in enumerate(value):
+                    try:
+                        float(component)
+                    except (TypeError, ValueError):
+                        errors.append(
+                            f"{spec.name}[{i}] : {component!r} n'est pas un "
+                            f"nombre.")
                 continue
             if spec.lo is None or spec.hi is None:
                 continue

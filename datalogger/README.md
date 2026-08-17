@@ -8,8 +8,13 @@ output of the other.
 
 | Path | Where it runs | Output | Status |
 |---|---|---|---|
-| On-robot logger (main) | Robot controller + USB key | `ACQ_log_*.csv` | Planned, see [`plan_acq_datalogger.md`](../docs/superpower/plans/plan_acq_datalogger.md) |
+| On-robot logger (main) | Robot controller + USB key | `ACQ_log_*.csv` | Implemented, in [`../onrobot/`](../onrobot/README.md) - Python, not part of this folder |
 | RTDE fallback monitor | Lab computer, over the network | `ACQ_rtde_*.csv` | Implemented, described below |
+
+**This folder is C only.** It holds one executable, which records what the robot transmits
+on its RTDE port, plus its build script and its C test harness. The on-robot acquisition
+path is Python and lives in [`../onrobot/`](../onrobot/README.md); the two share the seven
+CSV columns and nothing else - no code, no process, no file.
 
 ---
 
@@ -53,7 +58,9 @@ Starting the tool while a program is already running also opens a file, rather t
 for the next program start.
 
 If two trials land in the same wall-clock second, the second file gets a `_1`, `_2` suffix.
-No trial can overwrite another.
+No trial can overwrite another: past 99 same-second collisions (bare name plus `_1`
+through `_99` all taken), the tool refuses to open a new file rather than reuse one of
+those names, and reports the exhaustion on the console.
 
 ---
 
@@ -160,6 +167,13 @@ Time,ForceX,ForceY,ForceZ,PoseX,PoseY,PoseZ
 0.000,-0.123456,0.234567,-6.012345,0.412345,-0.298765,0.101234
 ```
 
+- `Data Source` names the local address of the socket that actually connected to the robot,
+  read at run time with `getsockname()`, not a constant: it is `192.168.4.14` above because
+  that is the lab computer's static IP from the deployment procedure, but the same binary run
+  from a commissioning laptop or the loopback emulator rig names that machine's own address
+  instead (`127.0.0.1` on loopback). If the address cannot be read, the field falls back to
+  the literal `unknown` rather than a plausible-looking guess. It is independent of
+  `Robot RTDE Endpoint` below, which is the peer, always `argv`.
 - `Time` is the robot's own RTDE `timestamp`, referenced to the first sample of the file, so
   it starts at `0.000` exactly like the on-robot path's tick time and the two CSVs align
   without any clock conversion. The absolute controller value of that first sample is kept

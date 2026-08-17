@@ -26,7 +26,12 @@ import numpy as np
 from matplotlib.widgets import Button, Slider, TextBox
 
 import design.params as P
-from design.export import generate_urscript, generate_urp
+from design.export import (
+    generate_urp,
+    generate_urp_acq,
+    generate_urscript,
+    generate_urscript_acq,
+)
 from design.live_ipc import build_ipc_overlay
 from design.settings import get_settings, startup_banner
 from design.trajectory import (
@@ -503,10 +508,17 @@ def main() -> int:
     exit_code = 0
 
     if args.export:
+        # Jumeau acquisition : tente uniquement si l'original a reussi
+        # (contrainte C2 #4). L'original est toujours ecrit et rapporte en
+        # premier.
         if not generate_urscript(cycles, force=args.force):
+            exit_code = 1
+        elif not generate_urscript_acq(cycles, force=args.force):
             exit_code = 1
     if args.export_urp:
         if not generate_urp(cycles, force=args.force):
+            exit_code = 1
+        elif not generate_urp_acq(cycles, force=args.force):
             exit_code = 1
 
     if not args.no_show:

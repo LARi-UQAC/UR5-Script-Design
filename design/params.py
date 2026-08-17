@@ -14,6 +14,8 @@ from pathlib import Path
 REPO_ROOT: Path = Path(__file__).resolve().parents[1]
 SCRIPT_PATH: Path = REPO_ROOT / "etalement.script"
 URP_PATH: Path = REPO_ROOT / "etalement.urp"
+ACQ_SCRIPT_PATH: Path = REPO_ROOT / "etalement_acq.script"
+ACQ_URP_PATH: Path = REPO_ROOT / "etalement_acq.urp"
 
 # =============================================================================
 # SURFACE
@@ -108,6 +110,14 @@ URSCRIPT_RECONTACT_V: float = 0.01 # m/s
 URSCRIPT_N_WAYPOINTS_CIRCULAR: int = 80
 URSCRIPT_MAX_TCP_SPEED: float = 0.250  # m/s — hard cap PolyScope
 URSCRIPT_MAX_BYTES: int = 200_000      # octets — budget mémoire PolyScope
+
+# =============================================================================
+# ACQUISITION LOGGER
+# =============================================================================
+ACQ_LOG_PORT: int = 50100        # port TCP loopback — daemon on-robot en écoute des échantillons
+ACQ_FT_PORT: int = 63351         # port fixe du flux URCap Robotiq FT Sensor côté contrôleur (non configurable dans PolyScope, par conception)
+ACQ_SAMPLE_TARGET_MS: int = 20   # ms — période d'échantillonnage cible, 50 Hz. Le tick du thread CB3 est 8 ms, donc l'URScript émis alterne 2 et 3 ticks (16/24 ms) pour une moyenne exacte de 20 ms
+ACQ_MAX_SAMPLES: int = 11700     # échantillons — plafond du tampon, environ 234 s à 50 Hz. Appliqué des deux côtés : garde de boucle URScript et daemon
 
 # =============================================================================
 # SONDAGE DE SURFACE (probe Z runtime)

@@ -28,7 +28,132 @@ second pair, `etalement_acq.script` / `etalement_acq.urp`, which is the original
 plus the data-acquisition process. The simulator (`ur5_sim --check/--visualize`) keeps
 consuming `etalement.script` only — nothing changes on the sim side.
 
-## 0. Questions to ask the user at execution start (blocking, per prompt requirement)
+## 0. Repo state at execution time (checked 2026-08-15, commit 7da2dfb)
+
+- `datalogger/` already exists and holds the **other** path, the RTDE fallback monitor
+  (`rtde_fallback_monitor.c`, 909 lines, commit 8c7c30e), its C test harness (147 checks,
+  `datalogger/tests/`) and `datalogger/README.md`. **`datalogger/` is exclusively C**
+  (operator decision, 2026-08-16): it is the executable that records what the robot
+  transmits on its port, and nothing Python belongs there. The acquisition daemon of this
+  plan therefore lands in its own folder, **`onrobot/`**, named for the criterion that
+  actually separates the two paths - what runs on the controller against what runs on the
+  lab computer. Its tests live in `tests/` and ARE collected by `unittest discover`, unlike
+  the C harness. `datalogger/README.md` carries a status table whose row "On-robot logger
+  (main)" says `Planned` and points at this plan; flipping it to `Implemented`, and writing
+  `onrobot/README.md`, is task D1.
+- **Robot emulation, two distinct things.** The only emulator that exists as code today is
+  `fake_server_thread` in `datalogger/tests/test_rtde_fallback_monitor.c`: it speaks the
+  RTDE handshake on `127.0.0.1`, replays a scripted `runtime_state` sequence, and lets the
+  monitor's whole socket path run with no robot. It emulates the robot **toward the RTDE
+  monitor**, over RTDE, in C, and it is confined to that test binary.
+- A second, larger emulator is **specified and planned, not yet implemented**:
+  `docs/superpower/specs/spec_rtde_emulator.md` (commit 7c36c13) and
+  `docs/superpower/plans/plan_rtde_emulator.md` (2496 lines, 10 tasks, commit 91636ad),
+  both on branch **`feat/rtde-emulator`**, both documentation only - no code lands in
+  either commit, and `main` is two commits behind them. It turns `ur5_sim` itself into the
+  robot: `ur5_sim/rtde_server.py` (big-endian RTDE encoder, TCP server on
+  `127.0.0.1:30004`, 125 Hz emitter thread, `runtime_state` machine, interpolation from
+  the trajectory's native 20 Hz up to the controller rate; stdlib only, no matplotlib and
+  no Swift, so it tests headless), `ur5_sim/force_model.py` (FT-300 surrogate: contact
+  stiffness, regulation transient, Coulomb friction, seeded noise; pure, no I/O),
+  `RTDE_EMU_*` / `FORCE_MODEL_*` constants in `ur5_sim/config.py`, a real PAUSE in the
+  viewer, `--emulate` / `--rtde-serve` / `--verify-csv` in `ur5_sim/cli.py`, and a
+  loopback-provenance line added to the monitor's CSV header. Intended invocation:
+  `python -m ur5_sim --emulate --runs 2 --pause-at 30`. Its client is the **already
+  implemented** C monitor, which is what makes it verifiable end to end.
+- **Consequence for the acquisition path.** That emulator speaks RTDE (port 30004, robot
+  toward a passive listener) and validates the **fallback** path; the acquisition path
+  needs the opposite shape, a client that pushes samples into the daemon on 50100 and a
+  server that streams FT-300 text frames on 63351. There is no direct substitution, and
+  neither plan blocks the other. Two seams cross over once `feat/rtde-emulator` is
+  implemented and merged:
+  - `ur5_sim/force_model.py` replaces the placeholder force source of the fake FT-300
+    server in E1 (one call site, `_force_at(t)`), so both paths are then exercised with
+    the same contact model instead of two unrelated invented ones.
+  - `--verify-csv` carries over **with one small tolerance**, not unchanged: its primary
+    check is geometric (distance from each recorded point to the commanded polyline,
+    max and RMS, tolerance 1e-5 m) and therefore metadata-agnostic, and §5 gives both
+    paths the same seven data columns. What differs is the metadata block (`# Data
+    Source: RTDE fallback monitor` against the acq block of §5) and the meaning of
+    `Time` (RTDE controller timestamp against robot tick time from the URScript thread).
+    A reader that skips `#` lines and does not assume the RTDE provenance line covers
+    both. That is the cheapest cross-validation available between the on-robot logger and
+    the RTDE monitor.
+  E1 is therefore written **standalone and small**, with no import of the unimplemented
+  modules and those two seams named in its docstring. Direction of dependency is one way
+  and must stay so: `acq_emulator.py` is dev-machine only and may import `ur5_sim`;
+  `acq_logger_daemon.py` runs on the controller and may import **nothing** but the
+  standard library.
+- **Branch and merge order.** This plan is executed on its own branch off `main`. It shares
+  no code file with `feat/rtde-emulator`; the only overlap is documentation
+  (`datalogger/README.md`, `ARCHITECTURE.md`, `CLAUDE.md`, `validate.bat`), so a conflict
+  at merge time is textual, never behavioral. Whichever branch merges second rewrites its
+  own rows in the `datalogger/README.md` status table.
+- Nothing else is touched: `etalement.script`, `etalement.urp`, the `design/` generation
+  path and `ur5_sim/` behavior stay byte-identical (guarantee 1 of §3).
+- **Defects found outside this scope are not repaired here.** Auditing the code this plan
+  builds on turned up seven, from an unvalidated settings-load path that can export a 200 N
+  force target to a hand-edit guard that fails open. They are registered with severities,
+  fixes and candidate tests in
+  [`erreur_hors_datalogger.md`](erreur_hors_datalogger.md). Two of them touch code this
+  plan reuses (`_validate_script_memory` in F2, `check_overwrite` in F3) but change no
+  behavior it depends on, so the two efforts stay independent; a diff that both added the
+  acquisition feature and repaired unrelated code could not be reviewed on either count.
+
+## 0-bis. Execution model - Opus here, Sonnet subagent for the mechanical work
+
+The plan is executed inside one chat session. Opus keeps the design, the URScript emission
+and every verification; a Sonnet subagent takes the mechanical code and **all** test files.
+
+Rules of the split:
+
+- **Never delegated**: acceptance of a returned diff, the byte-identity check on
+  `etalement.script`, the pose-equivalence review, the final suite run, `pip-audit`, and
+  the decision that a task is done. Counter-validation stays in this session, on Opus.
+- **One subagent per task**, `subagent_type: general-purpose`, `model: sonnet`, run in
+  background when the task has no open dependency. A subagent starts cold: its prompt
+  carries the full contract (files to touch, invariants, exact acceptance command), never
+  a pointer such as "see the plan".
+- Opus reviews the diff of each task before dispatching the next wave.
+
+**Constraint checklist that every Sonnet prompt must repeat verbatim:**
+
+1. Tests use stdlib `unittest`; **pytest is not installed** in `.venv`.
+2. `acq_logger_daemon.py` must stay valid under **Python 2.7** (controller) and run under
+   the venv's Python 3.13 (tests): no f-strings, `print()` as a function, no `pathlib`, no
+   type hints in that one file. Files are written in **binary mode** with explicit `\n`,
+   so a test on Windows sees the same bytes the controller writes.
+3. Settings invariant (ARCHITECTURE.md §8): never `from design.params import X` for a
+   value the operator can edit. The `ACQ_*` constants are export-time constants kept out
+   of `design/settings_spec.SPECS`, so `params.ACQ_LOG_PORT` module-attribute access is
+   allowed; if one is ever exposed in the settings window it must move to
+   `get_settings()`.
+4. `etalement.urp` is **hand-edited by the operator** between robot trials. Neither
+   `generate_urp()` nor any new code may write it. `etalement_acq.urp` goes through the
+   existing `check_overwrite()` digest guard, like every other export.
+5. CB3 rules (ARCHITECTURE.md §4): no `stopl`/`movel` inside a thread, no list slicing,
+   memory budget asserted with `_validate_script_memory()`.
+
+**Task table.** Complexity is stated for the code, not the prose.
+
+| # | Task | Complexity | Owner | Depends on |
+|---|---|---|---|---|
+| A1 | `onrobot/acq_logger_daemon.py` against the contract in §3-bis | Medium (stdlib sockets, threads, CSV bytes) | Sonnet | §3-bis (Opus) |
+| A2 | `onrobot/urmagic_acqlogger.sh` | Low | Sonnet | - |
+| B1 | `design/params.py`: `ACQ_*` constants and acq output paths | Low | Sonnet | - |
+| E1 | `onrobot/acq_emulator.py` (fake FT-300 server + fake robot client replaying real poses), standalone, with the two `feat/rtde-emulator` seams named in the docstring | Medium | Sonnet | §3-ter (Opus) |
+| C1 | `_build_acq_lines()`: logger thread, tick alternation, anchor insertion, STOP handshake | **High** (CB3 semantics, 8 ms tick, thread rules, anchor stability) | **Opus** | B1 |
+| C2 | `generate_urscript_acq()` / `generate_urp_acq()` + `design/app.py` wiring + overwrite guard | Medium | Sonnet | C1 |
+| T1 | `tests/test_acq_logger_daemon.py` | Medium | Sonnet | A1, E1 |
+| T2 | `tests/test_acq_export.py` (the 3 guarantees of §3) | Medium | Sonnet | C1, C2 |
+| D1 | `onrobot/README.md`: acq section, deployment steps, status row flipped | Low | Sonnet | A1, A2, C2 |
+| D2 | `ARCHITECTURE.md` + root `CLAUDE.md`: acq entries and invariants | Medium (states invariants) | **Opus** | C1, C2 |
+| V1 | Full suite, byte-identity of `etalement.script`, `ur5_sim --check`, `pip-audit` | Verification | **Opus, never delegated** | all |
+
+Waves: (1) A1 + A2 + B1 in parallel; Opus drafts C1 meanwhile. (2) E1 + C1 finalized.
+(3) C2, then T1 + T2 in parallel. (4) D1 + D2. (5) V1.
+
+## 0-ter. Questions to ask the user at execution start (blocking, per prompt requirement)
 
 1. **Exact PolyScope version** — ANSWERED: **PolyScope 3.11.0.82155 (20 August 2019)**,
    CB3 controller. Confirmed facts for this exact build (all hold for the 3.x branch):
@@ -98,18 +223,103 @@ URScript (data_logger thread, 50 Hz)
 - Repeat trials: each program run opens a new session -> new timestamped file; daemon adds
   `_1`, `_2` suffix on the (unlikely) same-second collision. No overwrite possible.
 
-## 3. Deliverables (new `datalogger/` folder + additive changes in `design/`)
+## 3. Deliverables (new files in the existing `datalogger/` folder + additive changes in `design/`)
 
 | File | Content |
 |---|---|
-| `datalogger/acq_logger_daemon.py` | Python **2.7-compatible**, stdlib only (CB3 ships Python 2.7). Threads: (a) FT-300 reader — connects 63351, parses `(Fx, Fy, Fz, Mx, My, Mz)` text stream, keeps latest triple, auto-reconnect; (b) log server on 50100 — accepts URScript connection, parses `[t,x,y,z]` (or 7-field fallback) lines, appends to in-RAM list, on `STOP` writes CSV (metadata block + header + rows) to detected USB mount, replies status. USB mount auto-detected from `/proc/mounts` (vfat/exfat under `/media` or `/programs`); falls back to `/tmp` with a warning if no USB. |
-| `datalogger/urmagic_acqlogger.sh` | Kills previous instance, launches daemon with `nohup`, logs to USB. Short, auditable. |
+| `onrobot/acq_logger_daemon.py` | Full contract in **§3-bis**. Python **2.7-compatible**, stdlib only (CB3 ships Python 2.7). Threads: (a) FT-300 reader — connects 63351, parses `(Fx, Fy, Fz, Mx, My, Mz)` text stream, keeps latest triple, auto-reconnect; (b) log server on 50100 — accepts URScript connection, parses `[t,x,y,z]` (or 7-field fallback) lines, appends to in-RAM list, on `STOP` writes CSV (metadata block + header + rows) to detected USB mount, replies status. USB mount auto-detected from `/proc/mounts` (vfat/exfat under `/media` or `/programs`); falls back to `/tmp` with a warning if no USB. |
+| `onrobot/urmagic_acqlogger.sh` | Kills previous instance, launches daemon with `nohup`, logs to USB. Short, auditable. |
+| `onrobot/acq_emulator.py` | Dev-machine only. Fake FT-300 server on 63351 plus a fake robot client that replays the real poses of `etalement.script` into port 50100 at 50 Hz and closes with `STOP`. Full contract in §3-ter. Makes the offline verification an end-to-end run instead of a unit test, and is the acquisition-side mirror of the C `fake_server_thread`. |
 | `design/params.py` (additions only) | New constants per ARCHITECTURE rule 1: `ACQ_LOG_PORT = 50100`, `ACQ_SAMPLE_TARGET_MS = 20`, `ACQ_MAX_SAMPLES = 11700`, `ACQ_SCRIPT_PATH` / `ACQ_URP_PATH` (`etalement_acq.script` / `.urp`). No existing constant touched. |
 | `design/export.py` (additions only) | New `_build_acq_lines(base_lines)` wraps the untouched output of `_build_urscript_lines()`: inserts (a) header comment block for the acquisition process, (b) BeforeStart socket-open + abort-popup if daemon absent, (c) `thread data_logger():` definition, (d) `run data_logger()` right after `set_tcp(...)`, (e) shutdown + STOP handshake after the final retreat, before program end. Insertion via stable anchor lines already emitted by the builder (e.g. the `set_tcp` line and the retreat comment block); a missing anchor is a hard export error, not a silent skip. New `generate_urscript_acq()` / `generate_urp_acq()` reuse `_validate_script_memory()` on the acq files. `generate_urscript()` / `generate_urp()` are **not modified**. |
 | `design/app.py` (additions only) | `--export` / `--export-urp` now also write the `_acq` twin after the original (original files written first, byte-identical to today). |
-| `datalogger/README.md` | Deployment procedure (USB insertion, daemon check, load `etalement_acq.script`, run, retrieve CSV), version-dependency notes, FT-300 vs `get_tcp_force()` switch, and the rule: simulation always uses `etalement.script`. |
+| `onrobot/README.md` | Deployment procedure (USB insertion, daemon check, load `etalement_acq.script`, run, retrieve CSV), version-dependency notes, FT-300 vs `get_tcp_force()` switch, and the rule: simulation always uses `etalement.script`. |
 | `tests/test_acq_logger_daemon.py` | stdlib `unittest`, offline: fake FT-300 server + fake URScript client on loopback; asserts CSV metadata block, header `Time,ForceX,ForceY,ForceZ,PoseX,PoseY,PoseZ`, row count == sent count, no trailing preallocated rows, filename format, collision suffix, STOP handshake, buffer cap at 11700 with clean auto-stop. Must run on Windows dev machine (pure sockets, temp dir as fake USB). Daemon code stays Python-2.7-valid but the test may run it under the project venv's Python 3 — write it 2/3-compatible (no f-strings, `print()` function, etc.). |
 | `tests/test_acq_export.py` | Three guarantees: (1) **regression** — lines produced for `etalement.script` are identical with and without the acq feature present (original untouched); (2) **equivalence** — `parse_poses(etalement_acq.script)` returns exactly the same 4-tuples as `parse_poses(etalement.script)` (lenient parser ignores the thread block; motion unchanged); (3) **content** — acq script contains the thread def, `keep_logging`, bounds guard `log_index < ACQ_MAX_SAMPLES`, socket open before motion, STOP after retreat, and no `movel`/`stopl`/slicing inside the thread block. Memory budget asserted on the acq file too. |
+
+## 3-bis. Daemon contract (authored by Opus, implemented by Sonnet in task A1)
+
+`onrobot/acq_logger_daemon.py`, stdlib only, valid Python 2.7 and 3.x. Tests load it by
+path (`importlib.util.spec_from_file_location`), so it stays a **plain module**: no package
+`__init__.py`, no relative import, no assumption about its parent folder. That is what lets
+the same file be copied alone onto the USB key.
+
+Module constants: `DEFAULT_LOG_PORT = 50100`, `DEFAULT_FT_PORT = 63351`,
+`MAX_SAMPLES = 11700`, `HEADER = "Time,ForceX,ForceY,ForceZ,PoseX,PoseY,PoseZ"`.
+
+Pure functions (no socket, no clock, no disk - these carry most of the test surface):
+
+- `parse_ft_line(line)` -> `(fx, fy, fz)` or `None`. Accepts the documented Robotiq form
+  `( 0.12 , -3.40 , 5.60 , 0.00 , 0.00 , 0.00 )`: parentheses optional, whitespace
+  irrelevant, comma separated, 6 fields; a 3-field variant is also accepted. Anything else
+  returns `None` (never raises).
+- `parse_sample_line(line)` -> `(t, x, y, z)` or `(t, x, y, z, fx, fy, fz)` or `None`.
+  Accepts what `socket_send_line` emits for a list on CB3, `[0.016,0.412,-0.298,0.101]`,
+  with or without brackets.
+- `find_usb_mount(proc_mounts_text)` -> path string or `None`. Pure function over the text
+  of `/proc/mounts`; keeps `vfat`/`exfat` mounts under `/media` or `/programs`. The caller
+  falls back to `/tmp` and records that fallback in the metadata block.
+- `format_csv(meta, rows)` -> **bytes**. `%.3f` for `Time`, `%.6f` for the other six
+  columns, `\n` line ending, ASCII. The file is opened `'wb'`, written, `flush()`,
+  `os.fsync(f.fileno())`, closed - in that order.
+- `next_free_name(dir_listing, stem)` -> filename. `ACQ_log_YYYYMMDD_HHMMSS.csv`, and on
+  collision `_1`, `_2`, and so on. Overwriting is impossible by construction.
+
+Stateful classes (constructor takes its dependencies, so tests need no USB, no wall clock
+and no real sensor):
+
+- `FTReader(host, port)`: `.start()`, `.stop()`, `.latest()` -> last `(fx, fy, fz)` or
+  `(0.0, 0.0, 0.0)` before the first frame, `.ok` False until one frame parses. Reconnects
+  with a 1 s backoff and logs only on state change. Prints one **raw** sample at first
+  connect (this is the mitigation for the wire-format risk of §8: a mismatch must be seen
+  in the log before it is silently miscolumned into a CSV).
+- `LogServer(port, ft_reader, out_dir_resolver, clock)`: `.serve_one_session()` accepts one
+  connection, reads lines until `STOP <n>` or EOF, and returns
+  `SessionResult(path, n_rows, n_bad, ft_ok, truncated)`.
+
+Protocol on port 50100, line oriented, ASCII:
+
+| Received | Daemon action | Reply |
+|---|---|---|
+| a sample line | append to the RAM list | none |
+| an unparsable line | increment `n_bad`, keep going | none |
+| a sample line whose first field is **negative** | read the second field as the robot's own sample count, do not append | none |
+| `STOP <n>`, or a bare `STOP` | write the CSV, fsync, close | `OK <filename> <rows>\n` |
+| `STOP <n>` on a write failure | keep the RAM buffer intact | `ERR <reason>\n` |
+| `RETRY` | rewrite from the retained buffer | `OK ...` or `ERR ...` |
+
+**Amendment, 2026-08-15 (C1).** The plan originally had the robot send `STOP <log_index>`.
+That string cannot be built on CB3: PolyScope 3.x has neither `to_str` nor `str_cat`, so
+`"STOP " + acq_index` has no valid form (this is issue 7 of §1, whose consequence for the
+handshake was missed when §4.5 was written). The emitted script therefore sends the count as
+a **sentinel list with a negative first field**, `[-1.0, acq_index, 0.0, 0.0]`, immediately
+followed by the literal `"STOP"`, which is a constant and legal. The daemon accepts both
+that pair and the plain textual `STOP <n>`, which is what the emulator and the tests use.
+A count that disagrees with the number of rows received is reported, not corrected: it is
+the only evidence available that lines were dropped.
+
+At `MAX_SAMPLES` the server stops appending, **keeps draining** the socket so the robot
+never blocks on a full TCP buffer, and sets `truncated` in the metadata. All stdout lines
+are prefixed `[ACQ]`; `urmagic_acqlogger.sh` redirects them to a log file on the USB key.
+
+## 3-ter. Emulator contract (authored by Opus, implemented by Sonnet in task E1)
+
+`onrobot/acq_emulator.py`, Python 3, dev machine only, never shipped to the robot. It is
+the acquisition-side mirror of the C `fake_server_thread`, and it is what makes the offline
+smoke run of §7 a real end-to-end exercise rather than a unit test.
+
+- `--ft` runs the fake FT-300: TCP server on 63351, one text frame per 10 ms in the
+  Robotiq format. Force source is a placeholder (constant plus sine plus seeded noise)
+  whose call site is one function, `_force_at(t)`, so `ur5_sim/force_model.py` replaces it
+  in one line once `feat/rtde-emulator` is implemented and merged. Seeded, like that
+  module, so a produced CSV is reproducible.
+- `--robot etalement.script` parses the real program with `ur5_sim.parsing.parse_poses`,
+  then plays the poses into the log port at 50 Hz with the alternating 16/24 ms tick times
+  of §4.3, and finishes with `STOP <n>`. Exits non-zero unless the reply starts with `OK`.
+- `--samples N`, `--rate`, `--port`, `--ft-port` to drive the edge cases (buffer cap,
+  daemon absent, FT-300 absent).
+- The `in_contact` flag returned by `parse_poses` selects contact force vs near-zero force,
+  so the produced CSV can be eyeballed against the 6 N target the same way a real trial is.
 
 ## 4. Acquisition block design (emitted into `etalement_acq.script` by `_build_acq_lines`)
 
@@ -169,36 +379,55 @@ Time,ForceX,ForceY,ForceZ,PoseX,PoseY,PoseZ
   different filename prefix (`ACQ_rtde_` vs `ACQ_log_`) so the two outputs are never
   mistaken for each other even if both land in the same folder.
 
-## 6. Implementation order
+## 6. Implementation order (waves, with the owner of each step)
 
-1. `datalogger/acq_logger_daemon.py` + `tests/test_acq_logger_daemon.py` (TDD: fake
-   FT-300 + fake robot client; run `python -m unittest tests.test_acq_logger_daemon -v`).
-2. `datalogger/urmagic_acqlogger.sh` (trivial, reviewed for root-execution safety).
-3. `design/params.py` additions (ACQ_* constants, acq output paths).
-4. `design/export.py`: `_build_acq_lines()` + `generate_urscript_acq()` /
-   `generate_urp_acq()`; `design/app.py` wiring so `--export` / `--export-urp` also emit
-   the `_acq` twins. Zero edits inside `_build_urscript_lines()`, `generate_urscript()`,
-   `generate_urp()`.
-5. `tests/test_acq_export.py` (regression, pose-equivalence, content — see §3).
-6. `datalogger/README.md` deployment guide.
-7. Run full existing suite (`python -m unittest discover -s tests -p "test_*.py"`) —
-   expect green; then `python ur5_etalementv6.py --export --no-show` and confirm the
-   regenerated `etalement.script` is byte-identical to the current one (`git diff` /
-   `fc`), with `etalement_acq.script` appearing alongside.
-8. `python -m ur5_sim --check` against `etalement.script` — unchanged behavior (sim
-   never reads the acq file).
-9. `pip-audit -r requirements.txt` (no new deps expected — daemon is stdlib).
+Ownership and complexity are set in §0-bis; this is the sequence.
+
+1. **Wave 1, parallel Sonnet subagents**: A1 (daemon, per §3-bis), A2
+   (`urmagic_acqlogger.sh`, reviewed for root-execution safety), B1 (`design/params.py`
+   additions). Opus drafts C1 during this wave.
+2. **Wave 2**: E1 (emulator, per §3-ter, Sonnet) and C1 finalized (`_build_acq_lines()`,
+   Opus). C1 is the one task where a wrong line silently changes robot motion, which is
+   why it is not delegated.
+3. **Wave 3**: C2 (`generate_urscript_acq()` / `generate_urp_acq()` + `design/app.py`
+   wiring, Sonnet) with zero edits inside `_build_urscript_lines()`, `generate_urscript()`
+   or `generate_urp()`; then T1 and T2 in parallel (Sonnet), run with
+   `python -m unittest tests.test_acq_logger_daemon tests.test_acq_export -v`.
+4. **Wave 4**: D1 (`onrobot/README.md`: acq section, deployment guide, status row
+   flipped to `Implemented`, Sonnet) and D2 (`ARCHITECTURE.md` and root `CLAUDE.md`, Opus).
+5. **Wave 5, V1, Opus only, nothing delegated**:
+   - `python -m unittest discover -s tests -p "test_*.py"` - full suite green.
+   - `python ur5_etalementv6.py --export --no-show`, then confirm the output is
+     **byte-identical to `tests/fixtures/golden_headless.script`**, with
+     `etalement_acq.script` appearing alongside. The reference is the golden fixture, **not**
+     the committed `etalement.script`: measured 2026-08-15, a headless export reproduces the
+     fixture exactly (61 366 characters, 502 lines) while the committed artifact is a
+     different one (817 lines, 113 131 bytes) produced from the interactive UI with a richer
+     cycle configuration. Comparing against the committed file would fail for a reason that
+     has nothing to do with this plan (see F10 in
+     [`erreur_hors_datalogger.md`](erreur_hors_datalogger.md)). `--export-urp` is **not** run
+     without asking the operator first: `etalement.urp` is hand-edited between robot trials.
+   - `python -m ur5_sim --check` against `etalement.script` - unchanged behavior (the sim
+     never reads the acq file).
+   - Offline end-to-end: start the daemon, run `acq_emulator.py --ft` and
+     `--robot etalement.script`, inspect the produced CSV (timing column stepping
+     0.016/0.024 with a 0.020 mean, row count equal to the sent count).
+   - `pip-audit -r requirements.txt` (no new dependency expected - daemon and emulator are
+     stdlib).
 
 Simulation stays exactly as today: `ur5_sim` consumes `etalement.script` only. The acq
 twin is robot-only; `test_acq_export.py` guarantee (2) proves its motion is identical.
 
 ## 7. Verification
 
-Offline (dev machine):
-- `python -m unittest tests.test_acq_logger_daemon -v` — CSV content, header,
+Offline (dev machine). Tests are written by Sonnet (T1, T2); **running them and accepting
+the result is Opus work in this session** (V1), because a test that a model both wrote and
+graded validates nothing.
+- `python -m unittest tests.test_acq_logger_daemon -v` - CSV content, header,
   metadata, filename format, collision suffix, 11700 cap, STOP/OK handshake, FT-300 merge.
-- Manual smoke: run daemon locally, `python` snippet plays 9000 fake samples at 50 Hz,
-  inspect produced CSV timing columns.
+- Smoke run through the emulator (§3-ter), which replaces the ad hoc snippet: daemon
+  locally, `acq_emulator.py --ft` in one shell, `--robot etalement.script` in another,
+  then inspect the produced CSV timing columns.
 
 On robot (procedure in README, user executes):
 1. Copy the 3 files to USB root; insert into pendant; verify daemon start (log file on USB).
@@ -222,7 +451,7 @@ On robot (procedure in README, user executes):
 - **Force/pose sync**: daemon merges the latest 100 Hz FT-300 triple into each 50 Hz pose
   sample → worst-case 10 ms skew; acceptable for the 6 N spread analysis; documented.
 - **PolyScope version**: confirmed 3.11.0.82155 (Aug 2019), CB3 — resolved, no
-  outstanding version risk (§0.1).
+  outstanding version risk (§0-ter.1).
 
 ## 9. Requirement traceability (prompt -> plan)
 
