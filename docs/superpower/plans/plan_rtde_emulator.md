@@ -1,6 +1,10 @@
 # RTDE Emulator Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development. This is decided, not a preference — see "Execution model" below; do not fall back to superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+> **Starting cold?** Read, in this order: this header, "Execution model", "Model routing",
+> "Defects: two regimes", and "Global Constraints". Then dispatch Task 1. You do not need to
+> read the whole file, and no subagent should be given it.
 
 **Goal:** Make `ur5_sim` serve a UR5 CB3 RTDE stream on loopback so the already-built `rtde_fallback_monitor.exe` can be tested end to end with no robot present.
 
@@ -9,6 +13,33 @@
 **Tech Stack:** Python 3.13, stdlib only for the two new modules (`socket`, `struct`, `threading`, `random`, `math`, `bisect`). Tests are stdlib `unittest`. The counterpart is C (MinGW-w64) in `datalogger/`.
 
 **Spec:** [`../specs/spec_rtde_emulator.md`](../specs/spec_rtde_emulator.md)
+
+**Branch:** none. Work directly on `main` and commit there, task by task. This repo has a
+single developer and no feature-branch workflow; a branch here only fragments the plan
+across refs, which has already happened once.
+
+## Execution model - subagents, one per task
+
+**Decided 2026-08-16: this plan is executed by subagents, one per task, not inline.**
+
+The reason is cost, and the gap is roughly an order of magnitude rather than a few percent.
+A session that has been designing this work carries the monitor's C source, its test
+harness, the spec and this plan's 2556 lines in its context, and re-processes all of it at
+every step. A subagent receives only its own task section, about 2 000 tokens, plus the
+Global Constraints below. Seven of the ten tasks then run on Sonnet, which costs roughly a
+fifth of Opus per token.
+
+Consequences for whoever drives this:
+
+- **Give each subagent its task section and the Global Constraints, not the whole file.**
+  Each task carries its own test code, implementation code, verification command and commit,
+  precisely so a cold agent can execute it without reading the rest.
+- **Honor the Model line on each task.** It is the whole point of the split; ignoring it
+  puts the cheap work on the expensive model and wastes the arrangement.
+- **The driver reviews between tasks and runs the full suite.** No agent grades its own
+  work - the same rule the defect register applies to its own fixes.
+- **Do not run two subagents on tasks that touch the same file.** Tasks 6 and 7 both edit
+  `viewer.py`; they are sequential, never parallel.
 
 ## Model routing
 
@@ -29,26 +60,63 @@ Two rules that keep the routing honest:
 - **Never downgrade tasks 5, 6 or 7.** Their reasons are stated in their own
   Model lines and are specific, not generic caution.
 
-## Defects found outside this plan
+## Defects: two regimes, and which one you are in
 
-While implementing these tasks you will find faults in existing code that this plan does
-not cover. **Do not fix them here.** Log them in
-[`erreur_hors_datalogger.md`](erreur_hors_datalogger.md) and carry on with the task.
+This work has two halves, and they treat a newly found bug in **opposite** ways. Know which
+half you are in before touching anything.
+
+### Regime A - implementing Tasks 1 to 10 (feature work)
+
+You will find faults in existing code that this plan does not cover. **Do not fix them
+here.** Log them in [`erreur_hors_datalogger.md`](erreur_hors_datalogger.md) and carry on
+with the task.
 
 The reason is reviewability: a diff that both adds the emulator and repairs unrelated code
-cannot be judged on either count, and the repair is the half that will be waved through.
+cannot be judged on either count, and the repair is the half that gets waved through.
 
-- **Read that file's "Writing protocol" section before appending.** More than one session
-  writes to it, neither sees the other's buffer, and a write based on a stale read silently
-  destroys the other session's entries. Re-read immediately before writing, append above
-  `## Execution note`, and never renumber or reword an entry you did not write.
-- Entries already cover several things this plan touches: **F6** (`viewer.py` is 916 lines,
-  over the workspace file ceiling, and Task 6 edits it), **F7** (the dead `paused_sim_t`,
-  which Task 6 puts to use), **F8** (the monitor's hardcoded provenance address, adjacent to
-  Task 9 but independent of it) and **F9** (no `.gitattributes`). Check for an existing
-  entry before writing a new one.
-- If a task in this plan turns out to be underspecified, that is a **plan** defect: report
-  it against this file rather than logging it as a code fault in the register.
+If a task in this plan turns out to be underspecified, that is a **plan** defect: report it
+against this file rather than logging it as a code fault in the register.
+
+### Regime B - clearing the remaining register entries (repair work)
+
+The same session also finishes the open items of
+[`erreur_hors_datalogger.md`](erreur_hors_datalogger.md), following the procedure that file
+already sets out: its "Writing protocol" for concurrent writes, and its own model column,
+which is decided there and is **not** re-argued here.
+
+**In this regime, a bug found while making a correction is fixed immediately**, not logged
+for later. The reviewability argument of Regime A does not apply: the diff is already a
+repair diff, so a second repair belongs in it, and deferring means re-deriving the same
+context later at full cost.
+
+Two things still hold while fixing immediately:
+
+- **Record it anyway.** Since 2026-08-16 that file is a record as well as a backlog, with
+  `FIXED` markers stating what was done and how it was verified. A fix that leaves no entry
+  removes the only trace that the fault ever existed.
+- **Keep it a separate commit** from the correction that uncovered it, so each remains
+  reviewable on its own. Immediate means "in this session", not "in the same commit".
+
+The one exception: if the newly found fault is High severity, or changes behavior the
+operator depends on (an export that reaches the robot, the overwrite guard, a settings
+bound), log it and stop for a decision instead of fixing it in passing. Those are the
+entries the register itself routes to Opus for a decision, not to a fixer.
+
+### Ownership right now, 2026-08-16
+
+Four entries are open. **Another Claude Code session is working F10 live**, so files may
+change under you mid-task.
+
+| Entry | Owner |
+|---|---|
+| **F10** | Another session, in progress. **Do not touch it**, and expect `design/export.py`, the emitted header and `tests/fixtures/golden_headless.script` to move without warning. |
+| **F15** | This session. Fully specified in its entry, Sonnet writes it, Opus reviews the diff and runs the C harness. |
+| **F6** | This session, folded into Task 6: `viewer.py` is 916 lines and the register requires the split **before** PAUSE is added to it, not after. |
+| **F7** | This session, and it *is* Task 6. Do not open a second correction for it. |
+
+Because another session is writing concurrently, re-read any shared file immediately before
+editing it - the register, `design/export.py`, the golden fixture - and never from a copy
+read at session start.
 
 ## Global Constraints
 
