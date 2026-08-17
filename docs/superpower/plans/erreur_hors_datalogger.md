@@ -550,6 +550,48 @@ millisecond field. Never fall through to a name that still exists.
 
 ---
 
+## F15. `csv_open()` races between the existence check and the open (Low)
+
+**Status: OPEN**, and the only entry in this file that is. The session that fixed F1 to F14
+ran out of budget before this one; the work was deliberately not rushed, because it rewrites
+the file-creation path of the only data recorder and a mistake there costs recorded trials.
+The specification below is complete enough to execute directly.
+
+**Audit basis.** Reported 2026-08-16 by the agent fixing F14, in the code it had just
+touched. Present in the original and still present after that fix, which closed a different
+gap.
+
+**Where.** `datalogger/rtde_fallback_monitor.c`, `csv_open()`: the suffix loop calls
+`file_exists()` to pick a free name, then `fopen(w->path, "wb")` opens it.
+
+**Consequence.** `"wb"` is create-or-truncate, never create-exclusive. Between the check and
+the open, any other writer that creates the same candidate loses its file: the second opener
+truncates it without error. The realistic trigger is two monitor instances started against
+the same output directory, which is easy to do by accident (a second double-click) and which
+the tool neither detects nor forbids. It is the same class as F14 - a name believed free
+being written over - and the same guarantee is broken, but a lock in time rather than a
+counter at its bound.
+
+**Proposed correction.** Open exclusively instead of checking then opening: `CreateFileA`
+with `CREATE_NEW` fails when the file already exists, and the handle can be wrapped back
+into a `FILE*` with `_open_osfhandle` and `_fdopen`. The suffix loop then advances on the
+open's failure rather than on a prior existence test, which removes the window entirely
+instead of narrowing it. The C89-portable alternative, `fopen(path, "wbx")`, is not reliable
+across the MinGW runtimes this ships against and should not be used here.
+
+**Potential tests** (C harness):
+
+1. The ordinary progression is unchanged: no collision opens the bare name, one collision
+   `_1`, two `_2`.
+2. A file created between the check and the open is not truncated. Simulate by pre-creating
+   the candidate the loop is about to take, through the same code path.
+3. Exhaustion still refuses, as F14 requires: the two fixes must compose, not replace each
+   other.
+4. The returned `FILE*` still behaves as before for the writer: same buffering, same close
+   semantics, so the rest of the module is untouched by the change of opener.
+
+---
+
 ## Execution note
 
 Same split as [`plan_acq_datalogger.md`](plan_acq_datalogger.md) §0-bis: the corrections
