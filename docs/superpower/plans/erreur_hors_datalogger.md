@@ -6,16 +6,27 @@ Status at 2026-08-16, branch `feat/acq-datalogger` pushed at commit `fb54a4f`. E
 fifteen entries are fixed and verified; **four remain**, and they are the only ones. Each
 line says who it waits on and why, so nobody has to read the whole file to find the work.
 
-| # | Sev. | What is left | Waits on |
-|---|---|---|---|
-| **F15** | Low | The only entry still fully open. `csv_open()` picks a free name with `file_exists()` then opens it with `fopen(..., "wb")`, which creates **or truncates**: another writer taking the name in that gap loses its file silently. Correction and four test cases are written out in the entry, including that it must compose with F14 rather than replace it. | A session with budget for a careful C change. Deliberately not rushed: it rewrites the file-creation path of the only data recorder. |
-| **F10** | Medium | **Half done.** The decision was taken (the committed `etalement.script` stays the trial-of-record, and export verification is pinned to `tests/fixtures/golden_headless.script` instead of to it). The other half is not: no export yet states the cycle configuration that produced it, so no artifact can be reproduced or matched to a trial. That blind spot is exactly what let F11 ship unnoticed. | A decision on what the emitted header should carry, then the header change and a regenerated golden fixture in one deliberate commit. Interacts with F2 and F9 on line endings. |
-| **F6** | Low | `ur5_sim/visualization/viewer.py` is 916 lines, over the workspace file-size ceiling that `spec_rtde_emulator.md` itself claims to respect. Deferred by operator decision on 2026-08-16, not skipped. | The session implementing `plan_rtde_emulator.md` task 6, which must reopen this file anyway to add PAUSE, and which will have a way to exercise the viewer end to end. Splitting it twice would be two risky passes on an untested GUI file. |
-| **F7** | Low | `paused_sim_t` is dead (written `0.0` everywhere, read twice) and no PAUSE exists in the viewer. Not to be fixed here. | Already scheduled as task 6 of `plan_rtde_emulator.md`. Listed only so this audit is complete; opening a second correction would duplicate it. |
+| # | Sev. | Model | What is left | Waits on |
+|---|---|---|---|---|
+| **F15** | Low | **Sonnet**, the specification is already written; Opus reviews the diff and runs the harness | The only entry still fully open. `csv_open()` picks a free name with `file_exists()` then opens it with `fopen(..., "wb")`, which creates **or truncates**: another writer taking the name in that gap loses its file silently. Correction and four test cases are written out in the entry, including that it must compose with F14 rather than replace it. | A session with budget for a careful C change. Deliberately not rushed: it rewrites the file-creation path of the only data recorder. |
+| **F10** | Medium | **Opus** decides what the header must carry, then **Sonnet** emits it, regenerates the golden fixture and updates the tests | **Half done.** The decision was taken (the committed `etalement.script` stays the trial-of-record, and export verification is pinned to `tests/fixtures/golden_headless.script` instead of to it). The other half is not: no export yet states the cycle configuration that produced it, so no artifact can be reproduced or matched to a trial. That blind spot is exactly what let F11 ship unnoticed. | A decision on what the emitted header should carry, then the header change and a regenerated golden fixture in one deliberate commit. Interacts with F2 and F9 on line endings. |
+| **F6** | Low | **Opus.** Naming the seam is a module-boundary judgement on a file no test covers, and the result is only checkable by launching the viewer | `ur5_sim/visualization/viewer.py` is 916 lines, over the workspace file-size ceiling that `spec_rtde_emulator.md` itself claims to respect. Deferred by operator decision on 2026-08-16, not skipped. | The session implementing `plan_rtde_emulator.md` task 6, which must reopen this file anyway to add PAUSE, and which will have a way to exercise the viewer end to end. Splitting it twice would be two risky passes on an untested GUI file. |
+| **F7** | Low | Whatever `plan_rtde_emulator.md` task 6 assigns; do not re-decide it here | `paused_sim_t` is dead (written `0.0` everywhere, read twice) and no PAUSE exists in the viewer. Not to be fixed here. | Already scheduled as task 6 of `plan_rtde_emulator.md`. Listed only so this audit is complete; opening a second correction would duplicate it. |
 
 Everything else - F1 to F5, F8, F9, F11 to F14 - is corrected, with tests, and verified by a
 full run: 198 Python tests, 275 C checks, `python -m ur5_sim --check` clean, `pip-audit`
 clean.
+
+**How the model column was decided**, so it can be applied to entries added later rather
+than argued each time. Opus takes the work where the hard part is the decision: what an
+emitted header must contain, where a module boundary should fall, whether a returned diff is
+acceptable. Sonnet takes the work where the decision is already made and the hard part is
+doing it exactly: implementing a written specification, and writing tests. Two rules hold
+regardless of the split. Every fix is exercised by at least one test, and the test is written
+by Sonnet. And no model grades its own work: acceptance, the full-suite run and the C harness
+stay with Opus, in the session driving the fix, because a test that the same model both wrote
+and judged validates nothing. F1 and F11, the two worst defects in this file, were both found
+by that rule rather than by a test.
 
 ## Purpose
 
