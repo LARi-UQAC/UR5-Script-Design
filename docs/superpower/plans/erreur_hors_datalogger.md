@@ -1,5 +1,22 @@
 # Plan - defects found outside the data-logger scope
 
+## What is left to do (read this first)
+
+Status at 2026-08-16, branch `feat/acq-datalogger` pushed at commit `fb54a4f`. Eleven of the
+fifteen entries are fixed and verified; **four remain**, and they are the only ones. Each
+line says who it waits on and why, so nobody has to read the whole file to find the work.
+
+| # | Sev. | What is left | Waits on |
+|---|---|---|---|
+| **F15** | Low | The only entry still fully open. `csv_open()` picks a free name with `file_exists()` then opens it with `fopen(..., "wb")`, which creates **or truncates**: another writer taking the name in that gap loses its file silently. Correction and four test cases are written out in the entry, including that it must compose with F14 rather than replace it. | A session with budget for a careful C change. Deliberately not rushed: it rewrites the file-creation path of the only data recorder. |
+| **F10** | Medium | **Half done.** The decision was taken (the committed `etalement.script` stays the trial-of-record, and export verification is pinned to `tests/fixtures/golden_headless.script` instead of to it). The other half is not: no export yet states the cycle configuration that produced it, so no artifact can be reproduced or matched to a trial. That blind spot is exactly what let F11 ship unnoticed. | A decision on what the emitted header should carry, then the header change and a regenerated golden fixture in one deliberate commit. Interacts with F2 and F9 on line endings. |
+| **F6** | Low | `ur5_sim/visualization/viewer.py` is 916 lines, over the workspace file-size ceiling that `spec_rtde_emulator.md` itself claims to respect. Deferred by operator decision on 2026-08-16, not skipped. | The session implementing `plan_rtde_emulator.md` task 6, which must reopen this file anyway to add PAUSE, and which will have a way to exercise the viewer end to end. Splitting it twice would be two risky passes on an untested GUI file. |
+| **F7** | Low | `paused_sim_t` is dead (written `0.0` everywhere, read twice) and no PAUSE exists in the viewer. Not to be fixed here. | Already scheduled as task 6 of `plan_rtde_emulator.md`. Listed only so this audit is complete; opening a second correction would duplicate it. |
+
+Everything else - F1 to F5, F8, F9, F11 to F14 - is corrected, with tests, and verified by a
+full run: 198 Python tests, 275 C checks, `python -m ur5_sim --check` clean, `pip-audit`
+clean.
+
 ## Purpose
 
 Register of faults found in the existing code while preparing
@@ -7,8 +24,11 @@ Register of faults found in the existing code while preparing
 Mixing them in would make the acquisition work unreviewable: a diff that both adds a
 feature and repairs unrelated code cannot be judged on either count. Each entry carries a
 severity, the exact location, the reason it is out of scope, a proposed correction, and the
-tests that would pin it. Nothing here is fixed yet; this file is the backlog, not a report
-of work done.
+tests that would pin it.
+
+This file started as a pure backlog. Since 2026-08-16 it is also a record: entries carry a
+`FIXED` marker with what was done and how it was verified. The section above says what is
+still owed. An entry with no status line is one nobody has touched yet.
 
 Convention of this repo: plans live in `docs/superpower/plans/` (singular "superpower",
 per [`CLAUDE.md`](../../../CLAUDE.md)).
@@ -371,7 +391,14 @@ twice.
 
 ---
 
-## F10. The committed `etalement.script` cannot be reproduced by any documented command (Medium)
+## F10. The committed `etalement.script` cannot be reproduced by any documented command (Medium) - HALF DONE
+
+**Status: HALF DONE.** The decision half is settled: the committed artifact stays the
+trial-of-record, and export verification now compares against
+`tests/fixtures/golden_headless.script` rather than against it. The traceability half is
+not: no export states the cycle configuration that produced it, so the original problem -
+nobody can regenerate the file that ran a given trial - is still there. F11 is what that
+blind spot costs.
 
 **Where.** `etalement.script` at the repo root, tracked, 817 lines and 113 131 bytes.
 `python ur5_etalementv6.py --export --no-show` produces 502 lines and 61 366 characters
