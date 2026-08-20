@@ -949,12 +949,15 @@ static const char *first_data_row(const char *text)
 /*
  * These exercise csv_open() itself, so they touch the real filesystem under
  * a throwaway directory, cleaned up at the end of each test.  csv_open()
- * computes its stamp from time(NULL) internally rather than accepting one,
- * so the exhaustion and ordinary-path tests below rely on the same
- * same-wall-clock-second assumption already used by
- * test_two_runs_produce_two_distinct_files above: fast, back-to-back calls
- * in practice land in one second.
+ * takes its wall clock as a parameter (F16) rather than reading time(NULL)
+ * internally, so every test below drives it with the fixed stamp declared
+ * next and derives its expected filename from that same value through
+ * stamp_for_time() - no test races the second boundary any more.
  */
+
+/* A fixed wall clock for the naming tests: every stamp below is derived
+   from this value, so no test races the second boundary (F16). */
+static const time_t FIXED_STAMP_TIME = 1600000000;
 
 static void write_marker_file(const char *path, const char *marker)
 {
@@ -979,10 +982,9 @@ static int file_holds(const char *path, const char *marker)
     return ok;
 }
 
-static void compute_current_stamp(char *stamp, size_t stamp_len)
+static void stamp_for_time(time_t t, char *stamp, size_t stamp_len)
 {
-    time_t now = time(NULL);
-    struct tm *lt = localtime(&now);
+    struct tm *lt = localtime(&t);
     strftime(stamp, stamp_len, "%Y%m%d_%H%M%S", lt);
 }
 
@@ -1007,7 +1009,7 @@ static void test_csv_open_refuses_when_all_100_names_are_taken(void)
 
     GROUP("csv_open: refuses when all 100 same-second names are taken");
     fresh_dir(dir);
-    compute_current_stamp(stamp, sizeof(stamp));
+    stamp_for_time(FIXED_STAMP_TIME, stamp, sizeof(stamp));
 
     format_csv_filename(path, sizeof(path), dir, stamp);
     write_marker_file(path, marker);
@@ -1019,7 +1021,8 @@ static void test_csv_open_refuses_when_all_100_names_are_taken(void)
     }
 
     memset(&w, 0, sizeof(w));
-    CHECK(csv_open(&w, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0) != 0);
+    CHECK(csv_open(&w, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0,
+                   FIXED_STAMP_TIME) != 0);
     CHECK(w.fp == NULL);
 
     /* None of the 100 pre-recorded "trials" was reopened in "wb" mode. */
@@ -1056,15 +1059,18 @@ static void test_csv_open_ordinary_suffix_progression(void)
 
     /* Fresh directory: the first call has zero collisions, so it must open
      * the bare name with no suffix at all. */
-    CHECK(csv_open(&w1, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0) == 0);
+    CHECK(csv_open(&w1, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0,
+                   FIXED_STAMP_TIME) == 0);
     csv_close(&w1);
 
     /* One collision (the file w1 just left behind): must open _1. */
-    CHECK(csv_open(&w2, dir, INVALID_SOCKET, "192.168.4.38", 30004, 2.0) == 0);
+    CHECK(csv_open(&w2, dir, INVALID_SOCKET, "192.168.4.38", 30004, 2.0,
+                   FIXED_STAMP_TIME) == 0);
     csv_close(&w2);
 
     /* Two collisions (w1's file and w2's _1): must open _2. */
-    CHECK(csv_open(&w3, dir, INVALID_SOCKET, "192.168.4.38", 30004, 3.0) == 0);
+    CHECK(csv_open(&w3, dir, INVALID_SOCKET, "192.168.4.38", 30004, 3.0,
+                   FIXED_STAMP_TIME) == 0);
     csv_close(&w3);
 
     base_len = strlen(w1.path) - 4;   /* strip the trailing ".csv" */
@@ -1103,7 +1109,7 @@ static void test_csv_open_reports_failure_when_target_is_not_writable(void)
 
     memset(&w, 0, sizeof(w));
     CHECK(csv_open(&w, not_a_dir, INVALID_SOCKET, "192.168.4.38", 30004,
-                   1.0) != 0);
+                   1.0, FIXED_STAMP_TIME) != 0);
     CHECK(w.fp == NULL);
 
     remove(not_a_dir);
@@ -1146,15 +1152,18 @@ static void test_csv_open_ordinary_progression_is_unchanged(void)
     memset(&w3, 0, sizeof(w3));
 
     /* Fresh directory: zero collisions, so the bare name must be opened. */
-    CHECK(csv_open(&w1, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0) == 0);
+    CHECK(csv_open(&w1, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0,
+                   FIXED_STAMP_TIME) == 0);
     csv_close(&w1);
 
     /* One collision (w1's file): must open _1. */
-    CHECK(csv_open(&w2, dir, INVALID_SOCKET, "192.168.4.38", 30004, 2.0) == 0);
+    CHECK(csv_open(&w2, dir, INVALID_SOCKET, "192.168.4.38", 30004, 2.0,
+                   FIXED_STAMP_TIME) == 0);
     csv_close(&w2);
 
     /* Two collisions (w1's file and w2's _1): must open _2. */
-    CHECK(csv_open(&w3, dir, INVALID_SOCKET, "192.168.4.38", 30004, 3.0) == 0);
+    CHECK(csv_open(&w3, dir, INVALID_SOCKET, "192.168.4.38", 30004, 3.0,
+                   FIXED_STAMP_TIME) == 0);
     csv_close(&w3);
 
     base_len = strlen(w1.path) - 4;   /* strip the trailing ".csv" */
@@ -1191,7 +1200,7 @@ static void test_csv_open_does_not_truncate_a_file_created_before_the_open(void)
 
     GROUP("csv_open (F15): a file created before the open is not truncated");
     fresh_dir(dir);
-    compute_current_stamp(stamp, sizeof(stamp));
+    stamp_for_time(FIXED_STAMP_TIME, stamp, sizeof(stamp));
     format_csv_filename(bare_path, sizeof(bare_path), dir, stamp);
 
     /* Pre-create the exact candidate csv_open() is about to try, through
@@ -1205,7 +1214,8 @@ static void test_csv_open_does_not_truncate_a_file_created_before_the_open(void)
     }
 
     memset(&w, 0, sizeof(w));
-    CHECK(csv_open(&w, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0) == 0);
+    CHECK(csv_open(&w, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0,
+                   FIXED_STAMP_TIME) == 0);
     CHECK(w.fp != NULL);
     if (w.fp) {
         csv_close(&w);
@@ -1243,7 +1253,7 @@ static void test_csv_open_still_refuses_on_exhaustion(void)
 
     GROUP("csv_open (F15): exhaustion still refuses (composes with F14)");
     fresh_dir(dir);
-    compute_current_stamp(stamp, sizeof(stamp));
+    stamp_for_time(FIXED_STAMP_TIME, stamp, sizeof(stamp));
 
     format_csv_filename(path, sizeof(path), dir, stamp);
     fp = NULL;
@@ -1265,7 +1275,8 @@ static void test_csv_open_still_refuses_on_exhaustion(void)
     }
 
     memset(&w, 0, sizeof(w));
-    CHECK(csv_open(&w, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0) != 0);
+    CHECK(csv_open(&w, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0,
+                   FIXED_STAMP_TIME) != 0);
     CHECK(w.fp == NULL);
 
     /* None of the 100 pre-recorded "trials" was reopened and truncated. */
@@ -1302,7 +1313,8 @@ static void test_csv_open_returned_fp_writes_and_closes_normally(void)
     GROUP("csv_open (F15): returned FILE* writes and closes like before");
     fresh_dir(dir);
     memset(&w, 0, sizeof(w));
-    CHECK(csv_open(&w, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0) == 0);
+    CHECK(csv_open(&w, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0,
+                   FIXED_STAMP_TIME) == 0);
     CHECK(w.fp != NULL);
     if (!w.fp) {
         rmdir_recursive(dir);
@@ -1326,6 +1338,37 @@ static void test_csv_open_returned_fp_writes_and_closes_normally(void)
             CHECK(strncmp(first_data_row(text), "0.000,", 6) == 0);
         }
         free(text);
+    }
+
+    rmdir_recursive(dir);
+}
+
+/*
+ * F16, the seam itself.  csv_open() must build its filename from the
+ * stamp_time argument it was handed, not from whatever second the wall
+ * clock happens to be on when it runs.  Derive the expected stamp from the
+ * same FIXED_STAMP_TIME through stamp_for_time() - the identical
+ * localtime()/strftime() path csv_open() itself uses - and require the
+ * opened file to carry exactly that name.
+ */
+static void test_csv_open_uses_the_injected_stamp(void)
+{
+    const char *dir = "_tmp_f16a";
+    char stamp[64];
+    char expect[MAX_PATH];
+    csv_writer_t w;
+
+    GROUP("csv_open (F16): filename comes from the injected stamp");
+    fresh_dir(dir);
+    stamp_for_time(FIXED_STAMP_TIME, stamp, sizeof(stamp));
+    format_csv_filename(expect, sizeof(expect), dir, stamp);
+
+    memset(&w, 0, sizeof(w));
+    CHECK(csv_open(&w, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0,
+                   FIXED_STAMP_TIME) == 0);
+    CHECK_STR(w.path, expect);
+    if (w.fp) {
+        csv_close(&w);
     }
 
     rmdir_recursive(dir);
@@ -1705,6 +1748,7 @@ int main(void)
     test_csv_open_does_not_truncate_a_file_created_before_the_open();
     test_csv_open_still_refuses_on_exhaustion();
     test_csv_open_returned_fp_writes_and_closes_normally();
+    test_csv_open_uses_the_injected_stamp();
 
     test_one_run_produces_one_csv();
     test_pause_does_not_split_the_file();

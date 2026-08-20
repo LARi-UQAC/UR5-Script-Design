@@ -463,9 +463,17 @@ static void local_address_of(SOCKET s, char *out, size_t out_len)
  * computer's wall clock; a same-second collision (two short trials, or a
  * restart) gets a _1, _2 ... suffix rather than overwriting a trial that has
  * already been recorded.
+ *
+ * The wall clock itself is supplied by the caller (stamp_time) rather than
+ * read here with time(NULL): the naming tests need to pin an exact stamp and
+ * derive their expected filename from that same value, and a clock read
+ * inside this function would leave them racing the second boundary against
+ * whatever they compute independently (F16).  monitor_run_once() is the one
+ * production caller and passes the real time(NULL) there.
  */
 static int csv_open(csv_writer_t *w, const char *out_dir, SOCKET sock,
-                    const char *robot_ip, int robot_port, double rtde_ts)
+                    const char *robot_ip, int robot_port, double rtde_ts,
+                    time_t stamp_time)
 {
     char header[1024];
     char stamp[64];
@@ -473,8 +481,7 @@ static int csv_open(csv_writer_t *w, const char *out_dir, SOCKET sock,
     char time_str[32];
     char base[MAX_PATH];
     char local_addr[INET_ADDRSTRLEN];
-    time_t now = time(NULL);
-    struct tm *lt = localtime(&now);
+    struct tm *lt = localtime(&stamp_time);
     int suffix;
     csv_create_result_t r;
 
@@ -961,7 +968,8 @@ static int monitor_run_once(const char *ip, int port, const char *out_dir)
         action = decide_file_action(prev_state, state);
         prev_state = state;
         if (action == FILE_ACTION_OPEN) {
-            if (csv_open(&writer, out_dir, conn.sock, ip, port, ts) != 0) {
+            if (csv_open(&writer, out_dir, conn.sock, ip, port, ts,
+                        time(NULL)) != 0) {
                 rc = MON_ERR_STREAM;
                 break;
             }
