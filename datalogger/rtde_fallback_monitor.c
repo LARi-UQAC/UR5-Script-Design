@@ -239,17 +239,24 @@ static int format_csv_row(char *buf, size_t buflen, double t_rel,
  * running the tool.  It is deliberately a separate parameter from robot_ip
  * (the peer, on the "Robot RTDE Endpoint" line below): one is local, the
  * other is remote, and they must never be conflated.
+ *
+ * simulated adds one more line, right after the endpoint: a lab recording
+ * and an ur5_sim emulator recording otherwise share the same prefix, schema
+ * and folder, so the header is the only place left to tell them apart. The
+ * caller passes is_loopback_ipv4(robot_ip) - the emulator binds 127.0.0.1
+ * only, so a loopback peer can never be the real robot at 192.168.4.38.
  */
 static int format_csv_header(char *buf, size_t buflen, const char *local_addr,
                              const char *robot_ip, int robot_port,
                              const char *date_str, const char *time_str,
-                             double rtde_t0)
+                             double rtde_t0, int simulated)
 {
     int n = snprintf(buf, buflen,
         "# Robot Model: UR5 CB3\n"
         "# PolyScope Version: 3.11.0.82155 (20 August 2019)\n"
         "# Data Source: RTDE fallback monitor (%s)\n"
         "# Robot RTDE Endpoint: %s:%d\n"
+        "%s"
         "# File Creation Date: %s\n"
         "# File Creation Time: %s\n"
         "# Target Acquisition Frequency: " TARGET_HZ_LABEL "\n"
@@ -257,7 +264,10 @@ static int format_csv_header(char *buf, size_t buflen, const char *local_addr,
         " of this file (s)\n"
         "# RTDE Timestamp At First Sample: %.6f s (controller uptime)\n"
         CSV_SCHEMA_LINE,
-        local_addr, robot_ip, robot_port, date_str, time_str, rtde_t0);
+        local_addr, robot_ip, robot_port,
+        simulated ? "# WARNING: SIMULATED SOURCE - ur5_sim RTDE emulator, "
+                    "not robot data\n" : "",
+        date_str, time_str, rtde_t0);
 
     if (n < 0 || (size_t)n >= buflen) {
         return -1;
@@ -300,6 +310,15 @@ static int is_valid_ipv4(const char *s)
         break;
     }
     return (*s == '\0' && octets == 4) ? 1 : 0;
+}
+
+/*
+ * 127.0.0.0/8.  The emulator in ur5_sim binds loopback only, so this is what
+ * separates a simulated recording from a lab one in the CSV header.
+ */
+static int is_loopback_ipv4(const char *s)
+{
+    return (s[0] == '1' && s[1] == '2' && s[2] == '7' && s[3] == '.');
 }
 
 static int format_csv_filename(char *buf, size_t buflen, const char *out_dir,
@@ -435,7 +454,8 @@ static int csv_open(csv_writer_t *w, const char *out_dir, SOCKET sock,
         return -1;
     }
     if (format_csv_header(header, sizeof(header), local_addr, robot_ip,
-                          robot_port, date_str, time_str, rtde_ts) < 0) {
+                          robot_port, date_str, time_str, rtde_ts,
+                          is_loopback_ipv4(robot_ip)) < 0) {
         fclose(w->fp);
         w->fp = NULL;
         return -1;

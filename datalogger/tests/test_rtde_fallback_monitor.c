@@ -376,7 +376,7 @@ static void test_csv_header_carries_the_schema_and_provenance(void)
 
     GROUP("format_csv_header");
     CHECK(format_csv_header(buf, sizeof(buf), "10.0.0.5", "192.168.4.38", 30004,
-                            "2026-08-14", "10:15:30", 123456.789) > 0);
+                            "2026-08-14", "10:15:30", 123456.789, 0) > 0);
     CHECK(strstr(buf, "# Robot Model: UR5 CB3\n") != NULL);
     CHECK(strstr(buf, "# PolyScope Version: 3.11.0.82155 (20 August 2019)\n") != NULL);
     /*
@@ -422,7 +422,7 @@ static void test_csv_header_data_source_degrades_to_unknown(void)
 
     GROUP("format_csv_header: unknown fallback shape");
     CHECK(format_csv_header(buf, sizeof(buf), "unknown", "192.168.4.38", 30004,
-                            "2026-08-14", "10:15:30", 123456.789) > 0);
+                            "2026-08-14", "10:15:30", 123456.789, 0) > 0);
     CHECK(strstr(buf, "# Data Source: RTDE fallback monitor (unknown)\n") != NULL);
 }
 
@@ -450,6 +450,42 @@ static void test_ipv4_validation(void)
     CHECK(is_valid_ipv4("192.168..38") == 0);
     CHECK(is_valid_ipv4("robot.local") == 0);
     CHECK(is_valid_ipv4("") == 0);
+}
+
+/*
+ * An emulator CSV must never be mistakable for a lab recording: same prefix,
+ * same schema, same folder.  A loopback endpoint is the marker, since the
+ * robot is at 192.168.4.38 and the emulator binds 127.0.0.1 only.
+ */
+static void test_loopback_detection(void)
+{
+    GROUP("is_loopback_ipv4");
+    CHECK(is_loopback_ipv4("127.0.0.1") == 1);
+    CHECK(is_loopback_ipv4("127.1.2.3") == 1);
+    CHECK(is_loopback_ipv4("192.168.4.38") == 0);
+    CHECK(is_loopback_ipv4("10.0.0.1") == 0);
+}
+
+/*
+ * format_csv_header now carries local_addr ahead of robot_ip (F8), so these
+ * calls exercise the simulated flag against the current 9-parameter
+ * signature: robot_ip is the peer csv_open() tests with is_loopback_ipv4(),
+ * local_addr is left at an ordinary workstation address in both cases so
+ * the warning is shown to depend on robot_ip alone.
+ */
+static void test_simulated_header_is_marked(void)
+{
+    char buf[1024];
+
+    GROUP("format_csv_header: simulated source");
+    CHECK(format_csv_header(buf, sizeof(buf), "10.0.0.5", "127.0.0.1", 30004,
+                            "2026-08-14", "10:15:30", 1.5, 1) > 0);
+    CHECK(strstr(buf, "# WARNING: SIMULATED SOURCE - ur5_sim RTDE emulator, "
+                      "not robot data\n") != NULL);
+
+    CHECK(format_csv_header(buf, sizeof(buf), "10.0.0.5", "192.168.4.38", 30004,
+                            "2026-08-14", "10:15:30", 1.5, 0) > 0);
+    CHECK(strstr(buf, "SIMULATED SOURCE") == NULL);
 }
 
 static void test_csv_filename_is_stamped_and_prefixed(void)
@@ -1410,6 +1446,8 @@ int main(void)
     test_csv_row_refuses_a_short_buffer();
     test_csv_header_carries_the_schema_and_provenance();
     test_csv_header_data_source_degrades_to_unknown();
+    test_loopback_detection();
+    test_simulated_header_is_marked();
     test_csv_filename_is_stamped_and_prefixed();
     test_ipv4_validation();
 
