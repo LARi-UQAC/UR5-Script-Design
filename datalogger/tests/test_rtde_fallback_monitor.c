@@ -7,6 +7,27 @@
  *
  * The tool's single translation unit is included directly, with its main()
  * compiled out, so the tests call the real functions rather than a copy.
+ *
+ * Sections, in file order.  Like the tool it includes, this file is exempt from
+ * the repository's file-size ceiling because the functions under test are
+ * static and reachable only from inside this translation unit; this index is
+ * the agreed substitute, so keep it accurate.  Each entry is the exact text of
+ * the banner comment that opens the section, so grep finds it (../../CLAUDE.md,
+ * "Size ceiling: the two C files are exempt").
+ *
+ *   Minimal check harness         CHECK / CHECK_U32 / CHECK_NEAR / CHECK_STR.
+ *   Group A                       big-endian decode, pinned byte sequences.
+ *   Group B                       runtime_state transition table.
+ *   Group C                       decimation to the 20 ms output grid.
+ *   Group D                       CSV formatting.
+ *   Group D-bis                   local_address_of (F8 CSV provenance).
+ *   Group E                       the fake RTDE server and its helpers; the
+ *                                 scenarios themselves are further down, under
+ *                                 "the integration scenarios".
+ *   Group D-ter                   csv_open suffix exhaustion (F14).
+ *   Group D-quater                csv_open exclusive create (F15) and the
+ *                                 injected stamp (F16).
+ *   the integration scenarios     run_against_fake and the end-to-end cases.
  */
 
 #define RTDE_TEST_BUILD 1

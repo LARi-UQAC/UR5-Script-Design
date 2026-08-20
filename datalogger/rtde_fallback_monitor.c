@@ -15,6 +15,28 @@
  * Build:  gcc -O2 -static -Wall -Wextra -o rtde_fallback_monitor.exe \
  *              rtde_fallback_monitor.c -lws2_32
  * Usage:  rtde_fallback_monitor.exe <robot-ip> <rtde-port> <out-dir>
+ *
+ * Sections, in file order.  This file is deliberately one translation unit and
+ * is exempt from the repository's file-size ceiling; this index is the agreed
+ * substitute, so keep it accurate.  Each entry is the exact text of the banner
+ * comment that opens the section, so grep finds it (../../CLAUDE.md, "Size
+ * ceiling: the two C files are exempt").
+ *
+ *   Protocol and output constants   RTDE package types, recipe, payload offsets,
+ *                                   runtime_state values, CSV schema and cadence.
+ *   Big-endian decode               read_be_* / write_be_*, alignment-safe.
+ *   File-boundary decision          decide_file_action: which runtime_state
+ *                                   transition opens or closes a CSV.
+ *   Decimation to the output grid   decimate_*: 50 Hz from whatever arrives.
+ *   CSV formatting                  format_csv_row / format_csv_header.
+ *   Address validation              is_valid_ipv4, is_loopback_ipv4,
+ *                                   format_csv_filename.
+ *   CSV writer                      csv_writer_t, csv_create_exclusive,
+ *                                   local_address_of, csv_open / write / close.
+ *   RTDE transport                  framing, handshake, connect.
+ *   Monitor session                 monitor_run_once, the reconnect loop.
+ *   Entry point                     usage, console handler, main (compiled out
+ *                                   under RTDE_TEST_BUILD).
  */
 
 #include <winsock2.h>

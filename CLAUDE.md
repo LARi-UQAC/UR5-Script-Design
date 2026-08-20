@@ -198,6 +198,26 @@ Stdlib `unittest`, no `conftest.py`, no pytest plugins. Tests live in `tests/`:
 
 **C-language exception.** `datalogger/` holds the RTDE fallback monitor, a standalone tool for a lab computer that has no Python and where nothing can be installed (isolated VLAN, no internet), so both the tool and its tests are C. `datalogger/tests/test_rtde_fallback_monitor.c` includes the tool's single translation unit with its `main()` compiled out, so it calls the real functions instead of shelling out. It is not collected by `unittest discover`; run `datalogger\tests\build_and_run_tests.bat` (needs MinGW-w64 `gcc` on `PATH`). It covers big-endian decoding against known byte sequences, every ordered `runtime_state` transition pair, the 20 ms decimation grid, the CSV schema, and an integration layer replaying the RTDE handshake from a fake server on loopback. `datalogger/` is fully standalone and **exclusively C**: it reads and writes nothing belonging to `etalement*.script`, `etalement*.urp`, `ur5_sim` or the design UI. Nothing Python belongs in that folder; the on-robot acquisition path lives in `onrobot/` for exactly that reason.
 
+**Size ceiling: the two C files are exempt, and this is why (F6).** Measured 2026-08-20
+against the 16384-character ceiling of the workspace `code-style.md`:
+`datalogger/rtde_fallback_monitor.c` is 35667 characters (2.2x) and
+`datalogger/tests/test_rtde_fallback_monitor.c` is 59896 (3.7x). They stay that way. The
+tool's internal functions are `static`, which is the only module boundary the C language
+offers inside a program, and the harness reaches them solely by including the translation
+unit. Splitting the tool into several compiled units would therefore require giving some
+thirty internal functions external linkage: the ceiling, whose purpose is module clarity,
+would be paid for by deleting the module boundary that already exists. The other route,
+textual `.inc` fragments included in order, keeps `static` and puts every file under the
+number, but produces fragments no compiler can check alone and no reviewer can read alone;
+it satisfies the metric while degrading what the metric measures. The ceiling's stated
+origin does not reach here either: it exists because the local-model bridge silently
+truncates an oversized prompt, and `datalogger/` is walled off from every local-model
+workflow by the paragraph above. What the ceiling protects that does apply, a reader
+finding the region they need without paging the whole file, is served instead by the
+banner-comment sections both files already carry and by the section index at the top of
+each. Keep that index accurate when adding a section; it is the substitute, so it is the
+part that is binding. The exemption covers `datalogger/*.c` only, never Python.
+
 **`onrobot/` — the on-controller acquisition path (Python).** `acq_logger_daemon.py` receives 50 Hz samples from `etalement_acq.script` over loopback port 50100, merges the Robotiq FT-300 stream from port 63351, and writes `ACQ_log_*.csv` to the USB key on `STOP`. `urmagic_acqlogger.sh` is the UR magic file that launches it as root when the key is inserted. `acq_emulator.py` is a development-machine tool (fake FT-300 plus a fake robot replaying `etalement.script`) and never ships to the robot. The daemon is Python 2.7 compatible, imports the standard library and nothing else, and is loaded by path in `tests/test_acq_logger_daemon.py` (which IS collected by `unittest discover`, unlike the C harness) because it is copied alone onto a USB key. See ARCHITECTURE.md, sections 2 and 9.
 
 No CI; run them locally before pushing changes that touch parsing, transforms, export, or the surface module.
