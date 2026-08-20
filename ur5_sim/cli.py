@@ -5,6 +5,8 @@ Three modes:
     --visualize   : same as --check, then open the matplotlib viewer.
     --identity    : override P_REF with P_ANCHOR_OLD (used to validate the
                     refactor itself by reproducing the original behaviour).
+    --verify-csv  : check a recorded monitor CSV against the commanded,
+                    surface-clamped polyline (ur5_sim/verify_csv.py).
 """
 
 from __future__ import annotations
@@ -52,6 +54,7 @@ from ur5_sim.parsing.urscript import (
 )
 from ur5_sim.probe import run_probe_simulation
 from ur5_sim.reporting.text_report import report
+from ur5_sim.verify_csv import add_verify_csv_argument, run_verify_csv_cli
 from ur5_sim.visualization.surface import (
     apply_surface_constraint,
     compute_surface_frame,
@@ -119,6 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Force P_REF = P_ANCHOR_OLD so the refactor itself can be tested.",
     )
     add_rtde_arguments(parser)
+    add_verify_csv_argument(parser)
     return parser
 
 
@@ -230,6 +234,14 @@ def main(argv: list[str] | None = None) -> int:
     # Frame i is commanded at i * DT seconds into the run: DT is the
     # densification step, so this is the trajectory's own time base.
     frame_times = [i * DT for i in range(len(poses_xform))]
+
+    if args.verify_csv is not None:
+        # Returns BEFORE the IK sweep too: the check is geometric against the
+        # same surface-clamped poses the emulator streamed, not a re-derived
+        # trajectory, and it has no need for the (slow) IK solve below.
+        polyline = [(x, y, z) for x, y, z, _rx, _ry, _rz
+                    in poses_to_xyzrpy(poses_xform)]
+        return run_verify_csv_cli(args.verify_csv, polyline)
 
     if args.emulate:
         # Returns BEFORE the IK sweep on purpose. That sweep costs about half
