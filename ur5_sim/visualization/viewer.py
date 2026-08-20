@@ -48,6 +48,7 @@ from ur5_sim.config import DT
 from ur5_sim.visualization.interactions import attach_pan, attach_scroll_zoom
 from ur5_sim.visualization.mpl_display import build_display
 from ur5_sim.visualization.playback import build_playback
+from ur5_sim.visualization.rtde_link import build_rtde_link
 from ur5_sim.visualization.swift_scene import (
     setup_swift_scene,
     start_heartbeat,
@@ -79,6 +80,9 @@ def visualize(
     plate_xy_per_frame: list[tuple[float, float]] | None = None,
     surface: dict | None = None,
     in_contact_per_frame: list[bool] | None = None,
+    poses_xyzrpy_per_frame: list[tuple[float, ...]] | None = None,
+    penetration_per_frame: list[float] | None = None,
+    rtde_server: Any = None,
 ) -> None:
     """Run the live animation with multi-configuration selection.
 
@@ -110,6 +114,20 @@ def visualize(
         ``force_mode(...)`` and ``end_force_mode()``. Drives the HUD
         ``F_Z`` field (6.0 N during contact, 0.0 N during transit) and the
         live marker colour. Defaults to all-False if omitted.
+    poses_xyzrpy_per_frame:
+        Optional list aligned with the trajectory, each entry the commanded
+        TCP pose as ``(x, y, z, rx, ry, rz)`` in metres and axis-angle
+        radians, AFTER the surface clamp - the same array ``run_ik``
+        received. Fed to the RTDE emulator so a CSV recorded from it can be
+        compared against the commanded path.
+    penetration_per_frame:
+        Optional list aligned with the trajectory, depth below the surface
+        plane in metres, positive downward. Drives the RTDE force surrogate.
+    rtde_server:
+        Optional started ``ur5_sim.rtde_server.RtdeServer``. When present the
+        viewer hands it the trajectory and reports every START / PAUSE /
+        RESUME / STOP, so the C monitor sees the run boundaries the operator
+        creates. The server is stopped when the window closes.
     """
     if not trajectories:
         raise ValueError("visualize() requires at least one trajectory")
@@ -119,6 +137,9 @@ def visualize(
     n_cycles_detected = max(cycle_per_frame) if cycle_per_frame else 0
     plate_xy_per_frame = _fit_per_frame(plate_xy_per_frame, n_frames, (0.0, 0.0))
     in_contact_per_frame = _fit_per_frame(in_contact_per_frame, n_frames, False)
+    poses_xyzrpy_per_frame = _fit_per_frame(
+        poses_xyzrpy_per_frame, n_frames, (0.0,) * 6)
+    penetration_per_frame = _fit_per_frame(penetration_per_frame, n_frames, 0.0)
 
     # --- 3D rendering : Swift (browser tab, WebGL) ---
     scene = setup_swift_scene(robot, surface)
@@ -133,10 +154,20 @@ def visualize(
     )
     fig = display["fig"]
 
+    # RTDE emulator hooks. Both are no-ops when no server is served, so the
+    # playback and control layers call them without a None check.
+    rtde = build_rtde_link(rtde_server)
+    frame_times = [i * dt for i in range(n_frames)]
+    rtde["load"](
+        poses_xyzrpy_per_frame, frame_times,
+        in_contact_per_frame, penetration_per_frame,
+    )
+
     playback = build_playback(
         robot, trajectories, dt, surface,
         cycle_per_frame, plate_xy_per_frame, in_contact_per_frame,
         n_cycles_detected, scene, display,
+        rtde["publish"], rtde["load"],
     )
 
     display["radio"].on_clicked(playback["on_radio"])
@@ -164,7 +195,13 @@ def visualize(
     timer.start()
     # Matplotlib timer now owns the heartbeat - stop the background thread.
     stop_heartbeat(hb_active, hb_thread)
-    plt.show()
+    try:
+        plt.show()
+    finally:
+        # The emulator holds a listening socket and a thread; leaking either
+        # would make the next run report the port busy for no visible reason.
+        if rtde_server is not None:
+            rtde_server.stop()
 
     # Cleanup on window close : flag the IPC so the design UI hides
     # its live marker even if the simulator window closes mid-cycle.

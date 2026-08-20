@@ -69,6 +69,9 @@ def build_controls(core: dict[str, Any]) -> dict[str, Any]:
     last_dt_real = core["last_dt_real"]
 
     compute_state = core["compute_state"]
+    # Reports START / PAUSE / STOP to the RTDE emulator; a no-op when none is
+    # served (ur5_sim.visualization.rtde_link).
+    publish_run_state = core["publish_run_state"]
     render_frame = core["render_frame"]
     write_hud = core["write_hud"]
 
@@ -81,6 +84,9 @@ def build_controls(core: dict[str, Any]) -> dict[str, Any]:
 
     def set_stop() -> None:
         # STOP is always a hard stop; next START must restart from frame 0.
+        # finished=True, so the monitor closes its CSV and the next START
+        # opens a new one - which is exactly what a replay from frame 0 is.
+        publish_run_state(False, 0.0, True)
         paused_sim_t[0] = 0.0
         state["running"] = False
         state["paused"] = False
@@ -111,6 +117,8 @@ def build_controls(core: dict[str, Any]) -> dict[str, Any]:
         # simulation time banked by set_pause. Only set_stop discards it.
         state["running"] = True
         state["paused"] = False
+        # The banked time is the resume point, and 0.0 on a fresh START.
+        publish_run_state(True, paused_sim_t[0], False)
         clock_t0[0] = time.perf_counter()
         last_wall[0] = None
         dt_real_window.clear()
@@ -133,9 +141,10 @@ def build_controls(core: dict[str, Any]) -> dict[str, Any]:
         pause_btn.label.set_text("RESUME")
         status_text.set_text("STATE = PAUSE")
         status_text.set_color("#a06000")
-        # Task 7 of plan_rtde_emulator.md publishes the run state to the RTDE
-        # emulator from here. Nothing is called yet: that hook does not exist
-        # in this repo, and a PAUSE must not raise inside a widget callback.
+        # finished=False with a positive banked time: runtime_state goes
+        # PAUSING then PAUSED, so the monitor keeps ONE file across the hold
+        # instead of splitting the run in two.
+        publish_run_state(False, paused_sim_t[0], False)
 
     def on_pause_button(_event) -> None:
         if state["running"]:

@@ -51,6 +51,17 @@ python -m unittest discover -s tests -p "test_*.py"
 python -m unittest tests.test_surface_constraint -v   # single module
 python -m unittest tests.test_surface_constraint.SurfaceFrameTests.test_snap_projects_pose_onto_plane
 
+# RTDE emulator: present ur5_sim to the C monitor as a CB3 controller.
+# Loopback only (127.0.0.1); --check never opens the socket.
+python -m ur5_sim --visualize              # emulator on by default, driven by
+                                           # the viewer's START / PAUSE / STOP
+python -m ur5_sim --visualize --no-rtde-serve
+python -m ur5_sim --emulate --runs 2       # headless, real time, no GUI:
+                                           # two runs -> two ACQ_rtde_*.csv
+python -m ur5_sim --emulate --pause-at 30  # pause once at t=30 s; must NOT
+                                           # split the CSV (one run, one file)
+python -m ur5_sim --emulate --rtde-port 31004
+
 # RTDE fallback monitor (C, not collected by unittest discovery) - needs MinGW-w64 gcc
 datalogger\tests\build_and_run_tests.bat
 datalogger\build.bat                       # produce rtde_fallback_monitor.exe
@@ -90,8 +101,10 @@ visualization/ viewer.visualize() (assembly point only), split by
                callbacks), playback_clock.py (PlaybackClock: PAUSE keeps
                elapsed sim time, STOP discards it), recompute.py
                (off-thread re-parse + IK), ipc_live.py (UDP status feed),
-               surface.py (test plate geometry + kinematic force
-               surrogate), interactions.py (mouse pan/zoom).
+               rtde_link.py (the RTDE emulator's load / publish hooks,
+               no-ops when no server is served), surface.py (test plate
+               geometry + kinematic force surrogate), interactions.py
+               (mouse pan/zoom).
 meshes/        FT-300 + 2F-85 + custom Support_doigt.stl pipeline
                for Swift; decimation, color extraction, link loader.
 reporting/     text_report.report() prints surface events first
@@ -100,15 +113,29 @@ reporting/     text_report.report() prints surface events first
 cli.py         Argparse entry point, anchors P_ANCHOR_OLD / P_REF,
                applies the surface constraint pre-IK, checks TCP
                speed globals, filters expected recontact deviations.
+emulate.py     CLI side of the RTDE emulator: the --rtde-* / --emulate
+               flags, the "on with --visualize, never with --check"
+               default, server construction with the force surrogate,
+               and the SE3 -> (x,y,z,rx,ry,rz) / penetration buffer
+               conversions the server is fed.
+rtde_server.py RTDE emulator: one loopback client, the CB3 handshake,
+               and a 125 Hz emitter thread. Output packages only, so
+               nothing that connects can command it. Re-exports
+               rtde_wire (framing, recipe, runtime_state machine,
+               interpolation) and rtde_headless (run_headless).
+force_model.py FT-300 force surrogate driven by contact flag,
+               penetration depth and TCP velocity. Parameters are
+               plausible, NOT measured (config.FORCE_MODEL_*).
 config.py      Paths, anchors, sim DT/speed, surface constants.
                Shared protocol constants are imported from
                design.params — never re-defined here or in
                submodules.
 ipc_config.py  UDP host/port/payload shared by viewer (writer)
                and design/live_ipc.py (reader).
-probe.py       3-point probe simulation — PARKED (incorrect
-               algorithm, guarded by SIM_PROBE_ENABLE = False;
-               export now uses the 1-point probe_surface_z).
+probe.py       3-point probe simulation and its script replay
+               (run_probe_simulation) — PARKED (incorrect algorithm,
+               guarded by SIM_PROBE_ENABLE = False; export now uses
+               the 1-point probe_surface_z).
 ```
 
 ### Coordinate frames (critical, all three are at play simultaneously)
@@ -157,6 +184,7 @@ Stdlib `unittest`, no `conftest.py`, no pytest plugins. Tests live in `tests/`:
 - `test_udp_ipc.py` covers the UDP frame round-trip.
 - `test_playback_clock.py` covers `PlaybackClock`: PAUSE keeps elapsed simulation time, STOP discards it so the next START replays from frame 0.
 - `test_viewer_pause.py` drives the real viewer callbacks headless (Agg backend, `time.perf_counter` faked, `env=None`) to pin the same three rules through the widgets: freeze, resume-not-replay, STOP-discards, plus the PAUSE/RESUME label and the HUD drift field. No window opens.
+- `test_force_model.py`, `test_rtde_server.py`, `test_rtde_headless.py`, `test_emulate_cli.py` and `test_viewer_rtde_wiring.py` cover the RTDE emulator: the force surrogate, the wire constants pinned against `datalogger/rtde_fallback_monitor.c`, the runtime_state machine and the served socket, the headless `run_headless` driver (two runs give two STOPPED -> PLAYING edges; a `--pause-at` gives PAUSED without a STOPPED in between), the `--check`-never-serves rule and the absence of any host flag, and the viewer publishing START / PAUSE / RESUME / STOP to a recording stub. All loopback, all GUI-free (Agg), all self-terminating.
 - `test_probe_sim.py` is parked with the disabled 3-point probe (see ARCHITECTURE.md, section 6).
 - `test_settings.py`, `test_export_settings.py`, `test_sim_reads_settings.py`, `test_settings_persistence.py`, and `test_ui_settings.py` cover the settings layer: `Settings` round-trip and bounds, byte-identity of a default export against `tests/fixtures/golden_headless.script`, `ur5_sim/config.py` reflecting `etalement_settings.json`, the versioned example file and the startup banner, and settings-window value capture on an unmapped Tk root (no Playwright - see `docs/superpower/plans/plan_variables_UI.md`, section 5.1). Full detail in ARCHITECTURE.md, section 9.
 

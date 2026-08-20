@@ -58,6 +58,10 @@ from ur5_sim.rtde_wire import (
     encode_packet,
     interpolate_pose,
 )
+# Same reason, same shape: the headless driver lives in ur5_sim/rtde_headless.py
+# and is re-exported here, so ur5_sim.rtde_server.run_headless stays the public
+# spelling whatever the file layout underneath.
+from ur5_sim.rtde_headless import run_headless  # noqa: F401
 
 
 class RtdeServer:

@@ -106,7 +106,7 @@ URSCRIPT_MAX_TCP_SPEED_MPS: float = _S.urscript_max_tcp_speed     # synchronisé
 # DESACTIVE - A REVOIR (rework futur). Le sondage 3 points est INCORRECT (fixe
 # en Z, ne gere ni rotation ni hauteur de plaque inconnue). L'export URScript a
 # ete bascule sur un sondage Z 1 point (probe_surface_z) ; le simulateur 3 points
-# (ur5_sim/probe.py + _run_probe_simulation) et ses tests sont parques. Mettre
+# (ur5_sim/probe.py + run_probe_simulation) et ses tests sont parques. Mettre
 # False desactive proprement le rejeu 3 points dans --check / --visualize.
 # Remettre True (et reactiver tests/test_probe_sim.py) lors du rework.
 SIM_PROBE_ENABLE: bool = False

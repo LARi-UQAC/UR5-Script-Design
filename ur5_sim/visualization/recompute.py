@@ -23,6 +23,7 @@ from ur5_sim.config import (
     SURFACE_ENABLE_CLAMP,
     URSCRIPT_MAX_TCP_SPEED_MPS,
 )
+from ur5_sim.emulate import penetration_from_depth, poses_to_xyzrpy
 from ur5_sim.kinematics.ik import run_ik
 from ur5_sim.kinematics.motion import densify_segments
 from ur5_sim.kinematics.transforms import rotate_translation_y
@@ -58,7 +59,9 @@ def recompute_all_branches(
         p_anchor_old: legacy anchor pose (SE3).
         p_ref: current reference pose (SE3).
         recompute (dict): shared handoff dict carrying ``lock``, ``done``,
-            ``total``, ``ready``, ``payload`` and ``error``.
+            ``total``, ``ready``, ``payload`` and ``error``. The payload
+            carries ``pose6`` and ``penetration`` for the RTDE emulator
+            alongside the buffers the viewer itself draws.
 
     Outputs:
         None. Everything is published into ``recompute``.
@@ -77,14 +80,20 @@ def recompute_all_branches(
             return
 
         poses_xform_latest = []
+        # Depth below the plane, positive downward, for the RTDE force
+        # surrogate. Captured here because the clamp erases it from the pose.
+        penetration_latest: list[float] = []
         for lineno, pose, _cycle, in_contact in parsed_latest:
             pose_tf = transform(urscript_pose(*pose), p_anchor_old, p_ref)
             pose_tf = rotate_translation_y(pose_tf, SIM_TRAJ_ROT_Y_RAD)
+            depth = 0.0
             if surface is not None and SURFACE_ENABLE_CLAMP:
-                pose_tf, _kind, _depth = apply_surface_constraint(
+                pose_tf, _kind, depth = apply_surface_constraint(
                     pose_tf, surface, in_contact, SURFACE_CLEARANCE_M,
                 )
             poses_xform_latest.append((lineno, pose_tf))
+            penetration_latest.append(
+                penetration_from_depth(in_contact, depth))
 
         new_cycle = [cyc for _l, _p, cyc, _ic in parsed_latest]
         new_plate = [(p[0], p[1]) for _l, p, _c, _ic in parsed_latest]
@@ -121,6 +130,8 @@ def recompute_all_branches(
                 "cycle": new_cycle,
                 "plate": new_plate,
                 "contact": new_contact,
+                "pose6": poses_to_xyzrpy(poses_xform_latest),
+                "penetration": penetration_latest,
             }
             recompute["ready"] = True
     except Exception as exc:  # pragma: no cover - surfaced to the HUD

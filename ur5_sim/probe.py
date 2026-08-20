@@ -5,8 +5,9 @@ DESACTIVE - A REVOIR (rework futur).
     revele INCORRECT : il est fixe en Z et ne gere ni la rotation de la plaque
     ni une hauteur de plaque inconnue (dependante de la manipulation de
     l'operateur). L'export URScript a ete bascule sur un sondage Z 1 point
-    (``probe_surface_z``). Ce module et son rejeu (``_run_probe_simulation``
-    dans cli.py, garde par ``SIM_PROBE_ENABLE = False``) sont donc inertes ;
+    (``probe_surface_z``). Ce module et son rejeu (``run_probe_simulation``,
+    plus bas dans ce fichier, garde par ``SIM_PROBE_ENABLE = False``) sont donc
+    inertes ;
     ils sont conserves, non supprimes, pour le rework. Les tests associes sont
     commentes dans ``tests/test_probe_sim.py``.
 
@@ -41,7 +42,20 @@ from typing import Optional
 import numpy as np
 from spatialmath import SE3, SO3
 
-from ur5_sim.parsing.urscript import urscript_pose
+from ur5_sim.config import (
+    SCRIPT_PATH,
+    SIM_PROBE_PLATE_DZ_M,
+    SIM_PROBE_PLATE_TILT_X_RAD,
+    SIM_PROBE_PLATE_TILT_Y_RAD,
+    SIM_PROBE_RESIDUAL_TOL_M,
+    SIM_PROBE_TILT_MAX_RAD,
+)
+from ur5_sim.parsing.urscript import (
+    parse_nhat,
+    parse_nominal_frame,
+    parse_probe_blocks,
+    urscript_pose,
+)
 
 
 def _pose6_to_se3(pose6: tuple) -> SE3:
@@ -207,3 +221,105 @@ def signed_distance_to_plane(point_xyz: np.ndarray, virtual_plate: dict) -> floa
     """
     p = np.asarray(point_xyz, dtype=float)
     return float(np.dot(p - virtual_plate["origin"], virtual_plate["normal"]))
+
+
+def run_probe_simulation(
+    segments_for_residual: list,
+) -> list[tuple[int, str, object]]:
+    """Simulate ``probe_surface_plane()`` against a virtual plate.
+
+    Returns a list of ``(lineno, kind, detail)`` events consumed by
+    :func:`ur5_sim.reporting.text_report.report`. Skips silently with a
+    ``PROBE_SKIPPED`` event if the script predates the 3-point probe block.
+    """
+    blocks = parse_probe_blocks(SCRIPT_PATH)
+    nominal = parse_nominal_frame(SCRIPT_PATH)
+    nhat = parse_nhat(SCRIPT_PATH)
+    if not blocks or nominal is None or nhat is None:
+        return [(0, "PROBE_SKIPPED",
+                 "script lacks probe_surface_plane() block - sim coverage off")]
+    if len(blocks) != 3:
+        return [(blocks[0][1], "PROBE_SKIPPED",
+                 f"expected 3 probe points, got {len(blocks)}")]
+
+    virtual_plate = build_virtual_plate(
+        nominal_frame_pose6=nominal,
+        nhat_world=nhat,
+        dz_m=SIM_PROBE_PLATE_DZ_M,
+        tilt_x_rad=SIM_PROBE_PLATE_TILT_X_RAD,
+        tilt_y_rad=SIM_PROBE_PLATE_TILT_Y_RAD,
+    )
+
+    events: list[tuple[int, str, object]] = []
+    contacts: list[tuple[float, ...]] = []
+    for idx, lineno, approach, floor in blocks:
+        cp = simulate_probe_descent(approach, floor, virtual_plate)
+        if cp is None:
+            events.append((lineno, "PROBE_NO_CONTACT",
+                           f"P{idx}: descente n'intersecte pas le plan virtuel "
+                           f"(dz={SIM_PROBE_PLATE_DZ_M*1000:+.1f} mm, "
+                           f"tilt_x={SIM_PROBE_PLATE_TILT_X_RAD:+.4f} rad, "
+                           f"tilt_y={SIM_PROBE_PLATE_TILT_Y_RAD:+.4f} rad)"))
+            return events
+        contacts.append(cp)
+        events.append((lineno, "PROBE_OK",
+                       f"P{idx} contact a z = {cp[2]*1000:+.3f} mm "
+                       f"(approche z = {approach[2]*1000:+.3f} mm)"))
+
+    try:
+        meas_frame, tilt_rad = compute_meas_frame(
+            contacts[0], contacts[1], contacts[2], nhat, nominal,
+        )
+    except ValueError as exc:
+        events.append((blocks[0][1], "PROBE_NO_CONTACT", str(exc)))
+        return events
+
+    if tilt_rad > SIM_PROBE_TILT_MAX_RAD:
+        events.append((blocks[0][1], "PROBE_TILT_EXCEEDED",
+                       f"tilt mesure = {tilt_rad:.4f} rad > "
+                       f"SIM_PROBE_TILT_MAX_RAD = {SIM_PROBE_TILT_MAX_RAD:.4f} rad"))
+        return events
+
+    # Validation : prendre le premier waypoint in_contact du cycle 1 qui est
+    # sur le plan nominal (ROBOT_Z_SURFACE), lui appliquer apply_correction
+    # Python et verifier qu'il atterrit sur le plan virtuel a
+    # SIM_PROBE_RESIDUAL_TOL_M pres. Le tout premier in_contact emis par le
+    # generateur est la "descente profonde" (z = ROBOT_Z_SURFACE -
+    # FORCE_CONTACT_DEPTH = ~5 mm sous le plan) : le controleur de force
+    # arrete reellement le robot au contact, mais le sim sans physique
+    # verrait un faux residu. On filtre donc les poses sous le plan nominal
+    # (le sim ne corrige que les vrais waypoints de trajectoire).
+    sample_lineno = None
+    sample_pose = None
+    n = np.asarray((nhat[0], nhat[1], nhat[2]), dtype=float)
+    o = np.asarray(nominal[:3], dtype=float)
+    # Iterate over the ORIGINAL parsed segments (not the densified buffer):
+    # SE3-slerp substeps between transit_in and contact_deep would otherwise
+    # appear at z = +Z_TRANSIT above the plane and corrupt the residual.
+    for seg in segments_for_residual:
+        if seg.cycle_idx != 1 or not seg.in_contact:
+            continue
+        p_xyz = np.asarray(seg.pose[:3], dtype=float)
+        signed = float(np.dot(p_xyz - o, n))
+        if signed < -1e-4:  # >0.1 mm sous le plan nominal = cible force, skip
+            continue
+        sample_lineno = seg.lineno
+        sample_pose = seg.pose
+        break
+    if sample_pose is None:
+        events.append((blocks[0][1], "PROBE_SKIPPED",
+                       "no in_contact waypoint in cycle 1 - residual not checked"))
+        return events
+
+    corrected = apply_correction(sample_pose, meas_frame, nominal)
+    residual_m = signed_distance_to_plane(corrected.t, virtual_plate)
+    if abs(residual_m) > SIM_PROBE_RESIDUAL_TOL_M:
+        events.append((sample_lineno, "PROBE_RESIDUAL",
+                       f"residu = {residual_m*1000:+.4f} mm > tol = "
+                       f"{SIM_PROBE_RESIDUAL_TOL_M*1000:.4f} mm "
+                       f"(tilt reconstruit = {tilt_rad:.4f} rad)"))
+    else:
+        events.append((sample_lineno, "PROBE_OK",
+                       f"residu post-correction = {residual_m*1000:+.4f} mm "
+                       f"(tilt reconstruit = {tilt_rad:.4f} rad)"))
+    return events

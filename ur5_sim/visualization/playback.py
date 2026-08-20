@@ -49,6 +49,8 @@ def build_playback(
     n_cycles_detected: int,
     scene: dict[str, Any],
     display: dict[str, Any],
+    publish_run_state: Any = None,
+    load_rtde_run: Any = None,
 ) -> dict[str, Any]:
     """
     --------------------------------------------------------------------------
@@ -65,6 +67,8 @@ def build_playback(
         n_cycles_detected (int): number of cycles found in the script.
         scene (dict): handles from swift_scene.setup_swift_scene.
         display (dict): handles from mpl_display.build_display.
+        publish_run_state, load_rtde_run: the RTDE emulator hooks from
+            visualization.rtde_link.build_rtde_link; None means no emulator.
 
     Outputs:
         playback (dict): state, tick, set_start, set_stop, set_pause,
@@ -72,6 +76,10 @@ def build_playback(
             on_radio / on_button / on_pause_button / on_swift_btn.
     --------------------------------------------------------------------------
     """
+    # Normalised once so every call site below is unconditional.
+    publish_run_state = publish_run_state or (lambda *_a, **_k: None)
+    load_rtde_run = load_rtde_run or (lambda *_a, **_k: None)
+
     env = scene["env"]
     ee_handles = scene["ee_handles"]
     tcp_marker = scene["tcp_marker"]
@@ -251,6 +259,9 @@ def build_playback(
         n_frames = len(trajectories[0][1])
         times = np.arange(n_frames) * dt
         total_sim_time = max(n_frames - 1, 1) * dt
+        # Re-arm the emulator: the script on disk changed under it.
+        load_rtde_run(payload["pose6"], times, in_contact_per_frame,
+                      payload["penetration"])
         ax_xyz.set_xlim(0, times[-1] if n_frames > 1 else 1.0)
         if state["idx"] >= len(trajectories):
             state["idx"] = 0
@@ -269,6 +280,7 @@ def build_playback(
         "dt_real_avg": dt_real_avg,
         "last_dt_real": last_dt_real,
         "compute_state": compute_state,
+        "publish_run_state": publish_run_state,
         "render_frame": render_frame,
         "write_hud": write_hud,
         "robot": robot,
@@ -330,6 +342,9 @@ def build_playback(
             return
         wall = time.perf_counter()
         sim_elapsed = (wall - clock_t0[0]) * SIM_SPEED + paused_sim_t[0]
+        # Every tick, not just on a frame change: the emulator resamples
+        # this clock at 125 Hz, the viewer repaints at ~33 Hz.
+        publish_run_state(True, sim_elapsed, sim_elapsed >= total_sim_time)
         if sim_elapsed > total_sim_time:
             # Fin de trajectoire : on MAINTIENT l'effecteur sur la derniere pose
             # (le retrait Z+3 cm au-dessus du dernier waypoint) et on arrete la

@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import sys
 
-import numpy as np
 import roboticstoolbox as rtb
 
 from ur5_sim.config import (
@@ -22,11 +21,6 @@ from ur5_sim.config import (
     P_REF_RAW,
     SCRIPT_PATH,
     SIM_PROBE_ENABLE,
-    SIM_PROBE_PLATE_DZ_M,
-    SIM_PROBE_PLATE_TILT_X_RAD,
-    SIM_PROBE_PLATE_TILT_Y_RAD,
-    SIM_PROBE_RESIDUAL_TOL_M,
-    SIM_PROBE_TILT_MAX_RAD,
     SIM_TRAJ_ROT_Y_RAD,
     SURFACE_CLEARANCE_M,
     SURFACE_ENABLE_CLAMP,
@@ -34,6 +28,14 @@ from ur5_sim.config import (
     SURFACE_FORCE_TARGET_TOL_M,
     URSCRIPT_MAX_TCP_SPEED_MPS,
     settings_summary,
+)
+from ur5_sim.emulate import (
+    add_rtde_arguments,
+    build_rtde_server,
+    penetration_from_depth,
+    poses_to_xyzrpy,
+    run_emulation,
+    wants_rtde,
 )
 from ur5_sim.kinematics.ik import run_ik
 from ur5_sim.kinematics.ik_multisolve import (
@@ -44,20 +46,11 @@ from ur5_sim.kinematics.motion import densify_segments
 from ur5_sim.kinematics.transforms import rotate_translation_y
 from ur5_sim.parsing.urscript import (
     parse_motion_segments,
-    parse_nhat,
-    parse_nominal_frame,
-    parse_probe_blocks,
     parse_tcp_speed_globals,
     transform,
     urscript_pose,
 )
-from ur5_sim.probe import (
-    apply_correction,
-    build_virtual_plate,
-    compute_meas_frame,
-    signed_distance_to_plane,
-    simulate_probe_descent,
-)
+from ur5_sim.probe import run_probe_simulation
 from ur5_sim.reporting.text_report import report
 from ur5_sim.visualization.surface import (
     apply_surface_constraint,
@@ -105,108 +98,6 @@ def _run_speed_limit_check() -> list[tuple[int, str, object]]:
     return events
 
 
-def _run_probe_simulation(
-    segments_for_residual: list,
-) -> list[tuple[int, str, object]]:
-    """Simulate ``probe_surface_plane()`` against a virtual plate.
-
-    Returns a list of ``(lineno, kind, detail)`` events consumed by
-    :func:`ur5_sim.reporting.text_report.report`. Skips silently with a
-    ``PROBE_SKIPPED`` event if the script predates the 3-point probe block.
-    """
-    blocks = parse_probe_blocks(SCRIPT_PATH)
-    nominal = parse_nominal_frame(SCRIPT_PATH)
-    nhat = parse_nhat(SCRIPT_PATH)
-    if not blocks or nominal is None or nhat is None:
-        return [(0, "PROBE_SKIPPED",
-                 "script lacks probe_surface_plane() block - sim coverage off")]
-    if len(blocks) != 3:
-        return [(blocks[0][1], "PROBE_SKIPPED",
-                 f"expected 3 probe points, got {len(blocks)}")]
-
-    virtual_plate = build_virtual_plate(
-        nominal_frame_pose6=nominal,
-        nhat_world=nhat,
-        dz_m=SIM_PROBE_PLATE_DZ_M,
-        tilt_x_rad=SIM_PROBE_PLATE_TILT_X_RAD,
-        tilt_y_rad=SIM_PROBE_PLATE_TILT_Y_RAD,
-    )
-
-    events: list[tuple[int, str, object]] = []
-    contacts: list[tuple[float, ...]] = []
-    for idx, lineno, approach, floor in blocks:
-        cp = simulate_probe_descent(approach, floor, virtual_plate)
-        if cp is None:
-            events.append((lineno, "PROBE_NO_CONTACT",
-                           f"P{idx}: descente n'intersecte pas le plan virtuel "
-                           f"(dz={SIM_PROBE_PLATE_DZ_M*1000:+.1f} mm, "
-                           f"tilt_x={SIM_PROBE_PLATE_TILT_X_RAD:+.4f} rad, "
-                           f"tilt_y={SIM_PROBE_PLATE_TILT_Y_RAD:+.4f} rad)"))
-            return events
-        contacts.append(cp)
-        events.append((lineno, "PROBE_OK",
-                       f"P{idx} contact a z = {cp[2]*1000:+.3f} mm "
-                       f"(approche z = {approach[2]*1000:+.3f} mm)"))
-
-    try:
-        meas_frame, tilt_rad = compute_meas_frame(
-            contacts[0], contacts[1], contacts[2], nhat, nominal,
-        )
-    except ValueError as exc:
-        events.append((blocks[0][1], "PROBE_NO_CONTACT", str(exc)))
-        return events
-
-    if tilt_rad > SIM_PROBE_TILT_MAX_RAD:
-        events.append((blocks[0][1], "PROBE_TILT_EXCEEDED",
-                       f"tilt mesure = {tilt_rad:.4f} rad > "
-                       f"SIM_PROBE_TILT_MAX_RAD = {SIM_PROBE_TILT_MAX_RAD:.4f} rad"))
-        return events
-
-    # Validation : prendre le premier waypoint in_contact du cycle 1 qui est
-    # sur le plan nominal (ROBOT_Z_SURFACE), lui appliquer apply_correction
-    # Python et verifier qu'il atterrit sur le plan virtuel a
-    # SIM_PROBE_RESIDUAL_TOL_M pres. Le tout premier in_contact emis par le
-    # generateur est la "descente profonde" (z = ROBOT_Z_SURFACE -
-    # FORCE_CONTACT_DEPTH = ~5 mm sous le plan) : le controleur de force
-    # arrete reellement le robot au contact, mais le sim sans physique
-    # verrait un faux residu. On filtre donc les poses sous le plan nominal
-    # (le sim ne corrige que les vrais waypoints de trajectoire).
-    sample_lineno = None
-    sample_pose = None
-    n = np.asarray((nhat[0], nhat[1], nhat[2]), dtype=float)
-    o = np.asarray(nominal[:3], dtype=float)
-    # Iterate over the ORIGINAL parsed segments (not the densified buffer):
-    # SE3-slerp substeps between transit_in and contact_deep would otherwise
-    # appear at z = +Z_TRANSIT above the plane and corrupt the residual.
-    for seg in segments_for_residual:
-        if seg.cycle_idx != 1 or not seg.in_contact:
-            continue
-        p_xyz = np.asarray(seg.pose[:3], dtype=float)
-        signed = float(np.dot(p_xyz - o, n))
-        if signed < -1e-4:  # >0.1 mm sous le plan nominal = cible force, skip
-            continue
-        sample_lineno = seg.lineno
-        sample_pose = seg.pose
-        break
-    if sample_pose is None:
-        events.append((blocks[0][1], "PROBE_SKIPPED",
-                       "no in_contact waypoint in cycle 1 - residual not checked"))
-        return events
-
-    corrected = apply_correction(sample_pose, meas_frame, nominal)
-    residual_m = signed_distance_to_plane(corrected.t, virtual_plate)
-    if abs(residual_m) > SIM_PROBE_RESIDUAL_TOL_M:
-        events.append((sample_lineno, "PROBE_RESIDUAL",
-                       f"residu = {residual_m*1000:+.4f} mm > tol = "
-                       f"{SIM_PROBE_RESIDUAL_TOL_M*1000:.4f} mm "
-                       f"(tilt reconstruit = {tilt_rad:.4f} rad)"))
-    else:
-        events.append((sample_lineno, "PROBE_OK",
-                       f"residu post-correction = {residual_m*1000:+.4f} mm "
-                       f"(tilt reconstruit = {tilt_rad:.4f} rad)"))
-    return events
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ur5_sim",
@@ -227,6 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Force P_REF = P_ANCHOR_OLD so the refactor itself can be tested.",
     )
+    add_rtde_arguments(parser)
     return parser
 
 
@@ -288,6 +180,12 @@ def main(argv: list[str] | None = None) -> int:
     # ------------------------------------------------------------------
     surface_frame = compute_surface_frame(p_anchor_old, p_ref)
     surface_events: list[tuple[int, str, object]] = []
+    # Depth below the plane, positive downward, per densified frame. Only the
+    # RTDE force surrogate reads it, and it has to be captured here: after the
+    # clamp the tool rides the plane, so the deliberate recontact overshoot -
+    # the one event that makes the synthesised Fz look like a real trial - is
+    # no longer recoverable from the poses.
+    penetration_per_frame: list[float] = [0.0] * len(poses_xform)
     if SURFACE_ENABLE_CLAMP:
         # Audit on the ORIGINAL (un-densified) segment poses. Densified
         # substeps are pure SE3 slerp interpolants between two parsed
@@ -317,14 +215,31 @@ def main(argv: list[str] | None = None) -> int:
         # solver and the viewer see a trajectory that rides on the
         # surface during contact (no event collection here).
         constrained = []
+        penetration_per_frame = []
         for (lineno, pose_tf), in_contact in zip(
             poses_xform, in_contact_per_frame,
         ):
-            pose_out, _kind, _depth = apply_surface_constraint(
+            pose_out, _kind, depth = apply_surface_constraint(
                 pose_tf, surface_frame, in_contact, SURFACE_CLEARANCE_M,
             )
             constrained.append((lineno, pose_out))
+            penetration_per_frame.append(
+                penetration_from_depth(in_contact, depth))
         poses_xform = constrained
+
+    # Frame i is commanded at i * DT seconds into the run: DT is the
+    # densification step, so this is the trajectory's own time base.
+    frame_times = [i * DT for i in range(len(poses_xform))]
+
+    if args.emulate:
+        # Returns BEFORE the IK sweep on purpose. That sweep costs about half
+        # a minute on the trial script, and the operator in the other terminal
+        # is waiting for the socket, not for a validation report. Run
+        # ``--check`` when the report is what is wanted.
+        return run_emulation(
+            poses_to_xyzrpy(poses_xform), frame_times,
+            in_contact_per_frame, penetration_per_frame, args,
+        )
 
     # ------------------------------------------------------------------
     # Sondage 3 points (L4) : rejoue probe_surface_plane() contre un plan
@@ -334,10 +249,10 @@ def main(argv: list[str] | None = None) -> int:
     #
     # DESACTIVE - A REVOIR (rework futur) : le sondage 3 points est INCORRECT
     # (fixe en Z). SIM_PROBE_ENABLE = False => probe_events reste vide. La
-    # fonction _run_probe_simulation et ur5_sim/probe.py sont conservees (non
+    # fonction run_probe_simulation et ur5_sim/probe.py sont conservees (non
     # supprimees) pour le rework. L'export emet desormais probe_surface_z.
     # ------------------------------------------------------------------
-    probe_events = _run_probe_simulation(segments) if SIM_PROBE_ENABLE else []
+    probe_events = run_probe_simulation(segments) if SIM_PROBE_ENABLE else []
     speed_events = _run_speed_limit_check()
 
     robot = rtb.models.UR5()
@@ -371,6 +286,9 @@ def main(argv: list[str] | None = None) -> int:
 
         from ur5_sim.visualization.viewer import visualize
         print(f"\nDetected {n_cycles} cycle(s) in the script.")
+        rtde_server = (
+            build_rtde_server(args.rtde_port) if wants_rtde(args) else None
+        )
         visualize(
             robot,
             labelled_trajectories,
@@ -378,6 +296,9 @@ def main(argv: list[str] | None = None) -> int:
             plate_xy_per_frame=plate_xy_per_frame,
             surface=surface_frame,
             in_contact_per_frame=in_contact_per_frame,
+            poses_xyzrpy_per_frame=poses_to_xyzrpy(poses_xform),
+            penetration_per_frame=penetration_per_frame,
+            rtde_server=rtde_server,
         )
 
     return 0 if not failures else 1
