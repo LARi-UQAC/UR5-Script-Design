@@ -25,7 +25,8 @@
 #include <stdint.h>
 #include <math.h>
 #include <time.h>
-#include <errno.h>
+#include <io.h>
+#include <fcntl.h>
 
 /* ------------------------------------------------------------------ */
 /* Protocol and output constants                                       */
@@ -348,9 +349,50 @@ typedef struct {
     long rows;
 } csv_writer_t;
 
-static int file_exists(const char *path)
+typedef enum {
+    CSV_CREATE_OK,        /* *out_fp is a writable, freshly created file */
+    CSV_CREATE_COLLISION, /* the name is already taken; try the next suffix */
+    CSV_CREATE_FAILED     /* some other failure; do not keep trying suffixes */
+} csv_create_result_t;
+
+/*
+ * Create out_fp exclusively at path: fails instead of truncating when the
+ * name is already taken, closing the F15 race between a free-name check and
+ * a plain fopen(path, "wb") (create-or-truncate) that let a second writer
+ * silently destroy a first writer's file if it won the name in between.
+ * CreateFileA's CREATE_NEW does the existence check and the creation as one
+ * atomic OS call, so there is no window left to race. The handle is wrapped
+ * back into a buffered FILE* via _open_osfhandle + _fdopen so the rest of
+ * the module (fputs, fclose) needs no change. fopen(path, "wbx") was
+ * considered and rejected: "x" mode support is not reliable across the
+ * MinGW runtimes this ships against.
+ */
+static csv_create_result_t csv_create_exclusive(const char *path, FILE **out_fp)
 {
-    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+    HANDLE h;
+    int fd;
+
+    *out_fp = NULL;
+    h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                    FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        return (GetLastError() == ERROR_FILE_EXISTS)
+               ? CSV_CREATE_COLLISION : CSV_CREATE_FAILED;
+    }
+    fd = _open_osfhandle((intptr_t)h, _O_WRONLY | _O_BINARY);
+    if (fd == -1) {
+        CloseHandle(h);
+        return CSV_CREATE_FAILED;
+    }
+    /* fd now owns the handle: from here a failure closes it via fd/fp, not
+     * via CloseHandle(), matching _open_osfhandle's documented ownership
+     * transfer. */
+    *out_fp = _fdopen(fd, "wb");
+    if (!*out_fp) {
+        _close(fd);
+        return CSV_CREATE_FAILED;
+    }
+    return CSV_CREATE_OK;
 }
 
 /*
@@ -412,6 +454,7 @@ static int csv_open(csv_writer_t *w, const char *out_dir, SOCKET sock,
     time_t now = time(NULL);
     struct tm *lt = localtime(&now);
     int suffix;
+    csv_create_result_t r;
 
     local_address_of(sock, local_addr, sizeof(local_addr));
 
@@ -423,34 +466,35 @@ static int csv_open(csv_writer_t *w, const char *out_dir, SOCKET sock,
         fprintf(stderr, "[RTDE] output path too long for directory '%s'\n", out_dir);
         return -1;
     }
-    for (suffix = 1; file_exists(w->path) && suffix < 100; suffix++) {
+    r = csv_create_exclusive(w->path, &w->fp);
+    for (suffix = 1; r == CSV_CREATE_COLLISION && suffix < 100; suffix++) {
         snprintf(base, sizeof(base), "%s_%d", stamp, suffix);
         if (format_csv_filename(w->path, sizeof(w->path), out_dir, base) < 0) {
             return -1;
         }
+        r = csv_create_exclusive(w->path, &w->fp);
     }
     /*
      * The loop above tries the bare name, then _1 through _99: 100 candidate
-     * names for one wall-clock second.  It stops either because it found a
-     * free one, or because suffix reached 100 with the last candidate (_99)
-     * still taken - the "suffix < 100" operand ends the loop independently of
-     * what file_exists() just reported.  Only checking file_exists() again,
-     * here, tells the two cases apart.  Falling through would fopen() an
-     * existing CSV in "wb" mode and silently destroy a previously recorded
-     * trial, which is exactly the guarantee this module and the README
-     * promise never to break.
+     * names for one wall-clock second, advancing to the next suffix only
+     * when the previous CREATE_NEW failed because that exact name is
+     * already taken (F15: no separate existence check, no window for
+     * another writer to take the name in between).  It stops either because
+     * a create succeeded, because a non-collision failure happened (bad
+     * out_dir, permissions - retrying more suffixes would not help), or
+     * because suffix reached 100 with _99 still taken.  The last case must
+     * still refuse rather than fall through to opening (and truncating) an
+     * existing CSV, which is the guarantee F14 added and this rewrite must
+     * not undo.
      */
-    if (file_exists(w->path)) {
+    if (r == CSV_CREATE_COLLISION) {
         fprintf(stderr, "[RTDE] all 100 filenames for stamp '%s' in '%s' are "
                         "already taken; refusing to overwrite an existing "
                         "trial\n", stamp, out_dir);
         return -1;
     }
-
-    w->fp = fopen(w->path, "wb");
-    if (!w->fp) {
-        fprintf(stderr, "[RTDE] cannot create '%s': %s\n",
-                w->path, strerror(errno));
+    if (r != CSV_CREATE_OK) {
+        fprintf(stderr, "[RTDE] cannot create '%s'\n", w->path);
         return -1;
     }
     if (format_csv_header(header, sizeof(header), local_addr, robot_ip,

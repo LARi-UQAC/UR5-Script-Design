@@ -1088,6 +1088,228 @@ static void test_csv_open_reports_failure_when_target_is_not_writable(void)
     remove(not_a_dir);
 }
 
+/* ------------------------------------------------------------------ */
+/* Group D-quater - csv_open() exclusive create instead of            */
+/* check-then-open (F15)                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * F15 replaced file_exists() + fopen(path, "wb") with a single CREATE_NEW
+ * open (csv_create_exclusive()), so the suffix loop now advances on the
+ * open itself failing rather than on a prior existence check that left a
+ * window for another writer to take the name in between.  These four tests
+ * are the entry's own list: the ordinary path must be unchanged, a name
+ * taken by someone else must never be truncated, exhaustion must still
+ * refuse exactly as F14 requires (the two fixes compose - F15 must not
+ * replace F14), and the FILE* handed back to the rest of the module must
+ * behave like any other buffered stream.
+ */
+
+/*
+ * F15, potential test 1.  Same progression F14 already pins (0, 1, 2
+ * collisions -> bare name, _1, _2), run again here against the
+ * CREATE_NEW-based csv_open() to confirm the rewrite left the ordinary,
+ * no-collision path untouched.
+ */
+static void test_csv_open_ordinary_progression_is_unchanged(void)
+{
+    const char *dir = "_tmp_f15a";
+    csv_writer_t w1, w2, w3;
+    char expect1[MAX_PATH], expect2[MAX_PATH];
+    size_t base_len;
+
+    GROUP("csv_open (F15): ordinary progression unchanged (0, 1, 2 collisions)");
+    fresh_dir(dir);
+    memset(&w1, 0, sizeof(w1));
+    memset(&w2, 0, sizeof(w2));
+    memset(&w3, 0, sizeof(w3));
+
+    /* Fresh directory: zero collisions, so the bare name must be opened. */
+    CHECK(csv_open(&w1, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0) == 0);
+    csv_close(&w1);
+
+    /* One collision (w1's file): must open _1. */
+    CHECK(csv_open(&w2, dir, INVALID_SOCKET, "192.168.4.38", 30004, 2.0) == 0);
+    csv_close(&w2);
+
+    /* Two collisions (w1's file and w2's _1): must open _2. */
+    CHECK(csv_open(&w3, dir, INVALID_SOCKET, "192.168.4.38", 30004, 3.0) == 0);
+    csv_close(&w3);
+
+    base_len = strlen(w1.path) - 4;   /* strip the trailing ".csv" */
+    snprintf(expect1, sizeof(expect1), "%.*s_1.csv", (int)base_len, w1.path);
+    snprintf(expect2, sizeof(expect2), "%.*s_2.csv", (int)base_len, w1.path);
+    CHECK_STR(w2.path, expect1);
+    CHECK_STR(w3.path, expect2);
+
+    rmdir_recursive(dir);
+}
+
+/*
+ * F15, potential test 2 - the fix itself.  Pre-create the bare-name
+ * candidate through the exact same code path csv_open() uses
+ * (csv_create_exclusive(), not a raw fopen), write a marker into it, then
+ * call csv_open() with the matching stamp.  Before this fix, csv_open()
+ * decided the bare name was free with a separate file_exists() call and
+ * then opened it with fopen(path, "wb") - a second, independent
+ * create-or-truncate that would have destroyed the marker no matter who
+ * created the file or exactly when.  After the fix, CREATE_NEW on the bare
+ * name fails outright because the name is taken, the loop advances to _1,
+ * and the pre-created file is left byte-for-byte intact.
+ */
+static void test_csv_open_does_not_truncate_a_file_created_before_the_open(void)
+{
+    const char *dir = "_tmp_f15b";
+    static const char marker[] = "SENTINEL-F15-DO-NOT-TRUNCATE";
+    char stamp[64];
+    char bare_path[MAX_PATH];
+    char expect1[MAX_PATH];
+    csv_writer_t w;
+    FILE *pre = NULL;
+    size_t base_len;
+
+    GROUP("csv_open (F15): a file created before the open is not truncated");
+    fresh_dir(dir);
+    compute_current_stamp(stamp, sizeof(stamp));
+    format_csv_filename(bare_path, sizeof(bare_path), dir, stamp);
+
+    /* Pre-create the exact candidate csv_open() is about to try, through
+     * the same CREATE_NEW path, so the test proves the collision is
+     * caught by the open itself rather than by some side channel. */
+    CHECK(csv_create_exclusive(bare_path, &pre) == CSV_CREATE_OK);
+    CHECK(pre != NULL);
+    if (pre) {
+        fputs(marker, pre);
+        fclose(pre);
+    }
+
+    memset(&w, 0, sizeof(w));
+    CHECK(csv_open(&w, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0) == 0);
+    CHECK(w.fp != NULL);
+    if (w.fp) {
+        csv_close(&w);
+    }
+
+    /* csv_open() must have skipped the taken bare name and landed on _1,
+     * and the pre-created file must not have been touched. */
+    base_len = strlen(bare_path) - 4;   /* strip the trailing ".csv" */
+    snprintf(expect1, sizeof(expect1), "%.*s_1.csv", (int)base_len, bare_path);
+    CHECK_STR(w.path, expect1);
+    CHECK(file_holds(bare_path, marker));
+
+    rmdir_recursive(dir);
+}
+
+/*
+ * F15, potential test 3.  Composition with F14: pre-create all 100
+ * same-second candidate names (the bare name plus _1 through _99) through
+ * the same CREATE_NEW path as test 2, then call csv_open() with the
+ * matching stamp.  F14 alone guarantees the loop refuses instead of
+ * falling through to a truncating open once every candidate is taken; this
+ * test proves that guarantee survives F15's rewrite of the loop's advance
+ * condition (collision-driven now, existence-driven before) instead of
+ * being undone by it.
+ */
+static void test_csv_open_still_refuses_on_exhaustion(void)
+{
+    const char *dir = "_tmp_f15c";
+    static const char marker[] = "SENTINEL-F15-EXHAUSTION";
+    char stamp[64];
+    char path[MAX_PATH];
+    csv_writer_t w;
+    FILE *fp;
+    int i;
+
+    GROUP("csv_open (F15): exhaustion still refuses (composes with F14)");
+    fresh_dir(dir);
+    compute_current_stamp(stamp, sizeof(stamp));
+
+    format_csv_filename(path, sizeof(path), dir, stamp);
+    fp = NULL;
+    CHECK(csv_create_exclusive(path, &fp) == CSV_CREATE_OK);
+    if (fp) {
+        fputs(marker, fp);
+        fclose(fp);
+    }
+    for (i = 1; i < 100; i++) {
+        char base[64];
+        snprintf(base, sizeof(base), "%s_%d", stamp, i);
+        format_csv_filename(path, sizeof(path), dir, base);
+        fp = NULL;
+        CHECK(csv_create_exclusive(path, &fp) == CSV_CREATE_OK);
+        if (fp) {
+            fputs(marker, fp);
+            fclose(fp);
+        }
+    }
+
+    memset(&w, 0, sizeof(w));
+    CHECK(csv_open(&w, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0) != 0);
+    CHECK(w.fp == NULL);
+
+    /* None of the 100 pre-recorded "trials" was reopened and truncated. */
+    format_csv_filename(path, sizeof(path), dir, stamp);
+    CHECK(file_holds(path, marker));
+    for (i = 1; i < 100; i++) {
+        char base[64];
+        snprintf(base, sizeof(base), "%s_%d", stamp, i);
+        format_csv_filename(path, sizeof(path), dir, base);
+        CHECK(file_holds(path, marker));
+    }
+
+    rmdir_recursive(dir);
+}
+
+/*
+ * F15, potential test 4.  The FILE* that csv_create_exclusive() hands back
+ * through _open_osfhandle + _fdopen must behave exactly like the fopen()
+ * handle it replaces: buffered fputs(), a correct row count after
+ * csv_write_sample(), and a clean close through csv_close() leaving a
+ * complete, parsable file.  This is the "rest of the module is untouched"
+ * half of the fix, exercised without a fake server since it is a property
+ * of the writer alone.
+ */
+static void test_csv_open_returned_fp_writes_and_closes_normally(void)
+{
+    const char *dir = "_tmp_f15d";
+    csv_writer_t w;
+    char *text;
+    double force3[3] = { 1.0, 2.0, 3.0 };
+    double pose3[3]  = { 0.1, 0.2, 0.3 };
+    int i;
+
+    GROUP("csv_open (F15): returned FILE* writes and closes like before");
+    fresh_dir(dir);
+    memset(&w, 0, sizeof(w));
+    CHECK(csv_open(&w, dir, INVALID_SOCKET, "192.168.4.38", 30004, 1.0) == 0);
+    CHECK(w.fp != NULL);
+    if (!w.fp) {
+        rmdir_recursive(dir);
+        return;
+    }
+
+    for (i = 0; i < 4; i++) {
+        csv_write_sample(&w, 1.0 + i * OUTPUT_GRID_S, force3, pose3);
+    }
+    CHECK(w.rows == 4);
+    csv_close(&w);
+    CHECK(w.fp == NULL);
+
+    text = read_text(w.path, NULL);
+    CHECK(text != NULL);
+    if (text) {
+        CHECK(strstr(text, CSV_SCHEMA_LINE) != NULL);
+        CHECK(count_data_rows(text) == 4);
+        CHECK(first_data_row(text) != NULL);
+        if (first_data_row(text)) {
+            CHECK(strncmp(first_data_row(text), "0.000,", 6) == 0);
+        }
+        free(text);
+    }
+
+    rmdir_recursive(dir);
+}
+
 /* -- the integration scenarios ------------------------------------- */
 
 static int run_against_fake(fake_server_cfg_t *cfg, const char *out_dir)
@@ -1457,6 +1679,11 @@ int main(void)
     test_csv_open_refuses_when_all_100_names_are_taken();
     test_csv_open_ordinary_suffix_progression();
     test_csv_open_reports_failure_when_target_is_not_writable();
+
+    test_csv_open_ordinary_progression_is_unchanged();
+    test_csv_open_does_not_truncate_a_file_created_before_the_open();
+    test_csv_open_still_refuses_on_exhaustion();
+    test_csv_open_returned_fp_writes_and_closes_normally();
 
     test_one_run_produces_one_csv();
     test_pause_does_not_split_the_file();
