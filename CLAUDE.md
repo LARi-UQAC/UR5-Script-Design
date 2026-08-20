@@ -82,9 +82,16 @@ kinematics/    SE(3) helpers (transforms.rotate_translation_y is the
                single source of truth for the SIM_TRAJ_ROT_Y_RAD
                remap), sequential IK (ik.run_ik), IK branch
                enumeration (ik_multisolve).
-visualization/ viewer.visualize() (Swift + matplotlib), surface.py
-               (test plate geometry + kinematic force surrogate),
-               interactions.py (matplotlib widget callbacks).
+visualization/ viewer.visualize() (assembly point only), split by
+               concern to hold the 4096-token file ceiling: swift_scene.py
+               (3D scene lifecycle), mpl_display.py (figure, overlays,
+               widgets, per-frame repaint), playback.py (buffer, clock,
+               HUD, timer tick), controls.py (START/STOP/config
+               callbacks), playback_clock.py (PlaybackClock: PAUSE keeps
+               elapsed sim time, STOP discards it), recompute.py
+               (off-thread re-parse + IK), ipc_live.py (UDP status feed),
+               surface.py (test plate geometry + kinematic force
+               surrogate), interactions.py (mouse pan/zoom).
 meshes/        FT-300 + 2F-85 + custom Support_doigt.stl pipeline
                for Swift; decimation, color extraction, link loader.
 reporting/     text_report.report() prints surface events first

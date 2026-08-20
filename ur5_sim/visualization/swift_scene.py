@@ -5,7 +5,8 @@ Responsabilités :
   - Lancement du backend Swift (navigateur WebGL).
   - Attachement des maillages fin d'effecteur (FT-300 + 2F-85 + Support_doigt).
   - Triade de repère base, marqueur TCP sphère.
-  - Socket UDP sortant pour l'IPC vers le design UI.
+  - Cycle de vie de la scène : montage, battement WebSocket, poussée de
+    pose par frame, réouverture de l'onglet, démontage.
 
 Toutes ces fonctions sont stateless ; elles retournent des handles que
 l'appelant conserve pour les mises à jour de pose à chaque frame.
@@ -13,9 +14,10 @@ l'appelant conserve pour les mises à jour de pose à chaque frame.
 
 from __future__ import annotations
 
-import json
-import socket
+import shutil
+import threading
 import time as _time
+import webbrowser
 from pathlib import Path
 
 import numpy as np
@@ -41,37 +43,14 @@ from ur5_sim.config import (
     SUPPORT_TOOL_LOCAL_XYZ,
     SUPPORT_TOOL_MESH_PATH,
 )
-from ur5_sim.ipc_config import TCP_LIVE_HOST, TCP_LIVE_PORT
+# Ré-exportés : le socket UDP a migré vers ipc_live.py, mais ces deux noms
+# restent importables depuis ce module (tests/test_udp_ipc.py les y prend).
+from ur5_sim.visualization.ipc_live import (  # noqa: F401
+    get_tcp_live_socket,
+    send_tcp_live,
+)
 from ur5_sim.kinematics.transforms import link_world_T, se3, tcp_tool_offset
 from ur5_sim.meshes import build_endeffector_meshes
-
-
-# ---------------------------------------------------------------------------
-# Socket UDP sortant (singleton de processus)
-# ---------------------------------------------------------------------------
-
-_TCP_LIVE_SOCKET: socket.socket | None = None
-
-
-def get_tcp_live_socket() -> socket.socket:
-    """Retourne le socket UDP sortant (créé au premier appel)."""
-    global _TCP_LIVE_SOCKET
-    if _TCP_LIVE_SOCKET is None:
-        _TCP_LIVE_SOCKET = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        _TCP_LIVE_SOCKET.setblocking(False)
-    return _TCP_LIVE_SOCKET
-
-
-def send_tcp_live(payload: dict) -> None:
-    """Envoie ``payload`` en JSON sur le socket UDP loopback."""
-    try:
-        sock = get_tcp_live_socket()
-        sock.sendto(
-            json.dumps(payload).encode("utf-8"),
-            (TCP_LIVE_HOST, TCP_LIVE_PORT),
-        )
-    except OSError:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -291,3 +270,150 @@ def attach_tcp_marker_to_swift(env, robot: rtb.Robot):
         print(f"[swift_scene] TCP marker échoué ({exc!r}).")
         return None
     return sphere
+
+
+# ---------------------------------------------------------------------------
+# Cycle de vie de la scène (monté / battement / poussée de pose / démontage)
+#
+# Ces cinq fonctions viennent de ``viewer.visualize`` : elles y étaient
+# inlinées et constituaient la moitié « câblage Swift » du fichier.
+# ---------------------------------------------------------------------------
+
+def setup_swift_scene(robot: rtb.Robot, surface: dict | None) -> dict:
+    """Lance Swift et attache tout ce que la scène 3D contient.
+
+    Retourne ``{"env", "ee_handles", "ee_temp_dir", "surface_handle",
+    "tcp_marker"}``; ``env`` vaut None quand Swift est indisponible, et
+    l'appelant retombe alors en mode 2D.
+    """
+    from ur5_sim.visualization.surface import attach_surface_to_swift
+
+    print("Launching Swift backend (browser tab will open)...")
+    env = launch_swift_env(robot)
+    ee_handles: list[dict] = []
+    ee_temp_dir = None
+    surface_handle = None
+    tcp_marker = None
+    if env is not None:
+        print("  Swift ready - the 3D view runs in your browser.")
+        attach_base_axes_to_swift(env)
+        ee_handles, ee_temp_dir = attach_endeffector_to_swift(robot, env)
+        tcp_marker = attach_tcp_marker_to_swift(env, robot)
+        if surface is not None:
+            surface_handle = attach_surface_to_swift(env, surface)
+            if surface_handle is not None:
+                print(
+                    f"  Test surface added: "
+                    f"{surface['w_m'] * 1000:.0f} x {surface['h_m'] * 1000:.0f} mm."
+                )
+        try:
+            env.step(0)
+        except Exception:
+            pass
+    else:
+        print("  matplotlib-only mode: 2D panels only, no 3D rendering.")
+    return {
+        "env": env,
+        "ee_handles": ee_handles,
+        "ee_temp_dir": ee_temp_dir,
+        "surface_handle": surface_handle,
+        "tcp_marker": tcp_marker,
+    }
+
+
+def start_heartbeat(env) -> tuple[list[bool], threading.Thread | None]:
+    """Swift WebSocket keepalive: start NOW, before matplotlib setup.
+
+    Creating the figure + axes + RadioButtons can take 5-15 s on Windows.
+    During that time the asyncio event loop is blocked in outq.get() and
+    cannot fire WebSocket pings - the browser tab would close otherwise.
+    """
+    active = [True]
+
+    def _swift_heartbeat() -> None:
+        while active[0]:
+            if env is not None:
+                try:
+                    env.step(0)
+                except Exception:
+                    pass
+            _time.sleep(0.4)
+
+    thread: threading.Thread | None = None
+    if env is not None:
+        thread = threading.Thread(target=_swift_heartbeat, daemon=True)
+        thread.start()
+    return active, thread
+
+
+def stop_heartbeat(active: list[bool], thread: threading.Thread | None) -> None:
+    """Hand the keepalive back to the matplotlib timer."""
+    active[0] = False
+    if thread is not None:
+        thread.join(timeout=1.0)
+
+
+def push_pose_to_swift(
+    env,
+    robot: rtb.Robot,
+    q,
+    ee_handles: list[dict],
+    tcp_marker,
+    tool_offset_A,
+) -> None:
+    """Pousse une configuration articulaire dans la scène 3D.
+
+    Ne rattrape aucune exception : les deux appelants historiques les
+    traitaient différemment (l'un les imprime, l'autre les ignore), donc la
+    décision reste chez eux.
+    """
+    robot.q = q
+    for h in ee_handles:
+        T_link = link_world_T(robot, q, h["name"])
+        T_local = h.get("T_local", np.eye(4))
+        h["shape"].T = T_link @ T_local
+    if tcp_marker is not None:
+        tcp_marker.T = np.asarray(
+            robot.fkine(q, end=END_LINK).A @ tool_offset_A,
+            dtype=float,
+        )
+    env.step(0)
+
+
+def reopen_swift_tab(env, robot: rtb.Robot, trajectory, frame_index: int) -> None:
+    """Rouvre l'onglet navigateur de Swift (bouton « Reouvrir 3D »)."""
+    # Swift's URL is stored on the backend; re-opening helps when the user
+    # accidentally closed the browser tab during playback.
+    try:
+        url = (
+            getattr(env, "swift_path", None)
+            or getattr(env, "url", None)
+            or getattr(env, "_url", None)
+            or getattr(env, "server_url", None)
+        )
+        if url:
+            print(f"[viewer] Reouvrir 3D: opening {url}")
+            webbrowser.open(url, new=1)
+        else:
+            print("[viewer] Reouvrir 3D: URL introuvable sur l'objet Swift, tentative de reveil puis localhost.")
+            # Fallback 1: trigger another step so Swift can re-emit its URL.
+            robot.q = trajectory[frame_index]
+            env.step(0)
+            # Fallback 2: try common local URLs used by Swift backend.
+            webbrowser.open("http://127.0.0.1:8080", new=1)
+    except Exception as exc:  # pragma: no cover
+        print(f"[viewer] Cannot re-open Swift tab: {exc!r}")
+
+
+def teardown_swift_scene(env, ee_temp_dir) -> None:
+    """Ferme Swift et efface les maillages temporaires."""
+    if env is not None:
+        try:
+            env.close()
+        except Exception:  # pragma: no cover
+            pass
+    if ee_temp_dir is not None:
+        try:
+            shutil.rmtree(ee_temp_dir, ignore_errors=True)
+        except Exception:  # pragma: no cover
+            pass

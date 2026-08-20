@@ -1,0 +1,183 @@
+"""
+ur5_sim/visualization/controls.py - rappels des widgets de lecture du viewer.
+
+START / STOP, le selecteur de configuration IK et le bouton « Reouvrir 3D ».
+Ces six fermetures etaient inlinees dans `viewer.visualize` ; elles vivent ici
+parce qu'elles forment la surface de commande de la lecture, distincte de la
+pompe a frames (`playback.py`) et de la construction des artistes
+(`mpl_display.py`).
+
+Elles partagent l'etat de lecture avec `playback.py` par le dictionnaire
+`core` que celui-ci assemble : les cellules d'horloge y sont des listes d'un
+element, donc mutables de part et d'autre de la frontiere, exactement comme
+elles l'etaient entre fermetures d'une meme fonction.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from typing import Any
+
+import matplotlib.pyplot as plt
+
+from ur5_sim.visualization.mpl_display import clear_frame_artists
+from ur5_sim.visualization.recompute import recompute_all_branches
+from ur5_sim.visualization.swift_scene import reopen_swift_tab
+
+
+def build_controls(core: dict[str, Any]) -> dict[str, Any]:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Build the widget callbacks that drive the playback state.
+
+    Inputs:
+        core (dict): shared playback context assembled by
+            ur5_sim.visualization.playback.build_playback - the state dict,
+            the recompute handoff, the display handles, the one-element
+            clock cells, and the compute_state / render_frame / write_hud
+            functions.
+
+    Outputs:
+        controls (dict): set_stop, set_start, reset_playback_to_start,
+            on_radio, on_button, on_swift_btn.
+    --------------------------------------------------------------------------
+    """
+    state = core["state"]
+    recompute = core["recompute"]
+    display = core["display"]
+    fig = display["fig"]
+    sim_text = display["sim_text"]
+    status_text = display["status_text"]
+    btn = display["btn"]
+    labels = display["labels"]
+
+    clock_t0 = core["clock_t0"]
+    paused_sim_t = core["paused_sim_t"]
+    last_drawn = core["last_drawn"]
+    last_wall = core["last_wall"]
+    dt_real_window = core["dt_real_window"]
+    dt_real_avg = core["dt_real_avg"]
+    last_dt_real = core["last_dt_real"]
+
+    compute_state = core["compute_state"]
+    render_frame = core["render_frame"]
+    write_hud = core["write_hud"]
+
+    robot = core["robot"]
+    env = core["env"]
+    trajectories = core["trajectories"]
+    surface = core["surface"]
+    p_anchor_old = core["p_anchor_old"]
+    p_ref = core["p_ref"]
+
+    def set_stop() -> None:
+        # STOP is always a hard stop; next START must restart from frame 0.
+        paused_sim_t[0] = 0.0
+        state["running"] = False
+        btn.label.set_text("START")
+        btn.color = "#cce5cc"
+        btn.hovercolor = "#a6d6a6"
+        status_text.set_text("STATE = STOP")
+        status_text.set_color("#a02020")
+
+    def reset_playback_to_start() -> None:
+        # Efface toutes les anciennes traces et repositionne la simulation au debut.
+        clear_frame_artists(display)
+
+        paused_sim_t[0] = 0.0
+        clock_t0[0] = time.perf_counter()
+        last_drawn[0] = -1
+        last_wall[0] = None
+        dt_real_window.clear()
+        dt_real_avg[0] = 0.0
+        last_dt_real[0] = 0.0
+
+        render_frame(0)
+        write_hud(0, 0.0)
+
+    def set_start() -> None:
+        state["running"] = True
+        clock_t0[0] = time.perf_counter()
+        last_wall[0] = None
+        dt_real_window.clear()
+        dt_real_avg[0] = 0.0
+        last_dt_real[0] = 0.0
+        btn.label.set_text("STOP")
+        btn.color = "#f5c6c6"
+        btn.hovercolor = "#e89999"
+        status_text.set_text("STATE = RUN")
+        status_text.set_color("#207020")
+
+    def on_radio(label: str) -> None:
+        if recompute["active"]:
+            return
+        idx = labels.index(label)
+        set_stop()
+        sim_text.set_text("Rebuilding buffer for selected configuration...")
+        fig.canvas.draw_idle()
+        plt.pause(0.01)
+        print(f"Rebuilding buffer for configuration '{label}'...")
+        t0 = time.perf_counter()
+        compute_state(idx)
+        print(f"  ready in {time.perf_counter() - t0:.1f} s.")
+        paused_sim_t[0] = 0.0
+        clock_t0[0] = time.perf_counter()
+        last_drawn[0] = -1
+        render_frame(0)
+        write_hud(0, 0.0)
+        fig.canvas.draw_idle()
+
+    def on_button(_event) -> None:
+        # STOP branch: a running playback is halted immediately.
+        if state["running"]:
+            set_stop()
+            write_hud(0, 0.0)
+            fig.canvas.draw_idle()
+            return
+        # A background recompute is already in flight -> ignore extra clicks.
+        if recompute["active"]:
+            fig.canvas.draw_idle()
+            return
+        # START always re-reads ``etalement.script`` and re-runs IK for every
+        # branch, so the viewer never replays a trajectory that is out of date
+        # with the file on disk (e.g. after the design UI re-exports it). The
+        # work runs off the GUI thread; ``tick`` shows the progress and swaps
+        # the fresh buffer in when the worker finishes (no freeze).
+        set_stop()
+        recompute["active"] = True
+        recompute["ready"] = False
+        recompute["error"] = None
+        recompute["payload"] = None
+        recompute["done"] = 0
+        recompute["total"] = 1
+        sim_text.set_text("Recomputing trajectory... 0%")
+        status_text.set_text("STATE = BUSY")
+        status_text.set_color("#a06000")
+        btn.label.set_text("...")
+        fig.canvas.draw_idle()
+        worker = threading.Thread(
+            target=recompute_all_branches,
+            args=(trajectories, surface, p_anchor_old, p_ref, recompute),
+            daemon=True,
+        )
+        worker.start()
+
+    def on_swift_btn(_event) -> None:
+        if env is None:
+            print("[viewer] Reouvrir 3D: Swift indisponible (env=None).")
+            return
+        reopen_swift_tab(
+            env, robot, state["trajectory"],
+            last_drawn[0] if last_drawn[0] >= 0 else 0,
+        )
+
+    return {
+        "set_stop": set_stop,
+        "set_start": set_start,
+        "reset_playback_to_start": reset_playback_to_start,
+        "on_radio": on_radio,
+        "on_button": on_button,
+        "on_swift_btn": on_swift_btn,
+    }
