@@ -2,29 +2,32 @@
 
 ## What is left to do (read this first)
 
-Status at 2026-08-20, on `main`. Fourteen of the fifteen entries are fixed and verified;
-**one remains**. Each line says who it waits on and why, so nobody has to read the whole
-file to find the work.
+Status at 2026-08-20, on `main`. **All fifteen entries are fixed and verified; none are
+still open.** F15, the last one, closed on 2026-08-20 in the same session that wrote this
+update: `csv_open()` now opens each candidate name with `CreateFileA(..., CREATE_NEW, ...)`
+wrapped into a `FILE*` (`_open_osfhandle` + `_fdopen`) instead of a `file_exists()` check
+followed by `fopen(..., "wb")`, so there is no window left for a second writer to take a
+name and get silently truncated. See the F15 entry below for the full account and how it
+was verified.
 
 F6 and F7 closed on 2026-08-20, together, in `plan_rtde_emulator.md` task 6, and in that
 order: `viewer.py` was split into seven modules first, in a commit that changed no
 behaviour, and PAUSE was added to the split file second. Read both entries before touching
-the viewer. The Python half of F6 is done; the C half (`rtde_fallback_monitor.c`, 909 lines,
-and its 1118-line test) is still only measured, not decided, and is folded into F15's
-session since it touches the same file.
+the viewer. The Python half of F6 is done; the C half (`rtde_fallback_monitor.c` and its
+test) is still only measured, not decided. F15's session fixed only the race F15 itself
+names and did not take up the module-split question - that decision is still open and
+belongs to a session scoped for it, not to this one.
 
 F10 closed on 2026-08-16. Its configuration turned out to be recoverable rather than lost:
 the committed `etalement.script` was reproduced byte for byte, its recipe is now emitted in
 every export, and the two `design/params.py` defaults that did not match the trial were
 aligned on it. Read the F10 entry before touching export or the golden fixture.
 
-| # | Sev. | Model | What is left | Waits on |
-|---|---|---|---|---|
-| **F15** | Low | **Sonnet**, the specification is already written; Opus reviews the diff and runs the harness | The only entry still fully open. `csv_open()` picks a free name with `file_exists()` then opens it with `fopen(..., "wb")`, which creates **or truncates**: another writer taking the name in that gap loses its file silently. Correction and four test cases are written out in the entry, including that it must compose with F14 rather than replace it. | A session with budget for a careful C change. Deliberately not rushed: it rewrites the file-creation path of the only data recorder. |
-
-Everything else - F1 to F5, F8 to F14 - is corrected, with tests, and verified by a
-full run: 198 Python tests, 275 C checks, `python -m ur5_sim --check` clean, `pip-audit`
-clean.
+Every entry in this register, F1 to F15, is corrected and has tests. F1 to F14 were last
+verified together: 198 Python tests, 275 C checks (before F15), `python -m ur5_sim --check`
+clean, `pip-audit` clean. F15's session touched no Python, so it did not re-run the Python
+suite, `ur5_sim --check`, or `pip-audit`; it rebuilt and ran the C harness only, which now
+stands at 505 checks, 0 failures (283 before F15's four new tests).
 
 **How the model column was decided**, so it can be applied to entries added later rather
 than argued each time. Opus takes the work where the hard part is the decision: what an
@@ -671,10 +674,8 @@ millisecond field. Never fall through to a name that still exists.
 
 ## F15. `csv_open()` races between the existence check and the open (Low)
 
-**Status: OPEN**, and the only entry in this file that is. The session that fixed F1 to F14
-ran out of budget before this one; the work was deliberately not rushed, because it rewrites
-the file-creation path of the only data recorder and a mistake there costs recorded trials.
-The specification below is complete enough to execute directly.
+**Status: FIXED on 2026-08-20.** See the block at the end of this entry for what was done
+and how it was verified.
 
 **Audit basis.** Reported 2026-08-16 by the agent fixing F14, in the code it had just
 touched. Present in the original and still present after that fix, which closed a different
@@ -709,9 +710,53 @@ across the MinGW runtimes this ships against and should not be used here.
 4. The returned `FILE*` still behaves as before for the writer: same buffering, same close
    semantics, so the rest of the module is untouched by the change of opener.
 
----
+**Status: FIXED on 2026-08-20.** Implemented exactly the proposed correction, no deviation.
+Added `csv_create_result_t csv_create_exclusive(const char *path, FILE **out_fp)` in
+`datalogger/rtde_fallback_monitor.c`, right before `csv_open()`: `CreateFileA(path,
+GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL)`, wrapped into a buffered
+`FILE*` via `_open_osfhandle(..., _O_WRONLY | _O_BINARY)` then `_fdopen(fd, "wb")`. It
+returns `CSV_CREATE_OK`, `CSV_CREATE_COLLISION` (the `CreateFileA` failure was
+`ERROR_FILE_EXISTS`), or `CSV_CREATE_FAILED` (any other failure - bad `out_dir`,
+permissions). `csv_open()`'s suffix loop now reads `for (suffix = 1; r ==
+CSV_CREATE_COLLISION && suffix < 100; suffix++)`, calling `csv_create_exclusive()` again on
+each iteration, in place of the old `file_exists(w->path) && suffix < 100` followed by a
+separate `fopen(w->path, "wb")` once a name looked free. The old `file_exists()` helper had
+no other caller left after the rewrite and was removed rather than left dead. `fopen(path,
+"wbx")` was not used, per the entry's own rejection of it.
 
-## Execution note
+**F14 composition**, the point the entry called out explicitly: exhaustion (`r ==
+CSV_CREATE_COLLISION` still true after `suffix` reaches 100) is handled by its own branch
+that prints the same "all 100 filenames ... already taken; refusing to overwrite" message
+and returns -1 before ever reaching the open - F15 changed what advances the loop, not F14's
+refusal at its bound. A separate branch (`r != CSV_CREATE_OK`) covers a non-collision
+failure (e.g. the F14-era "target is not writable" case) by reporting the failure and
+returning -1 without exhausting all 100 suffixes on a cause that retrying would not fix.
+
+**Tests added**, all four from the list above, in
+`datalogger/tests/test_rtde_fallback_monitor.c` (Group D-quater, right after the F14 group):
+`test_csv_open_ordinary_progression_is_unchanged`,
+`test_csv_open_does_not_truncate_a_file_created_before_the_open` (the fix itself: pre-creates
+the bare-name candidate through `csv_create_exclusive()` itself, then confirms `csv_open()`
+lands on `_1` and the pre-created file still holds its marker byte-for-byte),
+`test_csv_open_still_refuses_on_exhaustion` (all 100 same-second names pre-created through
+the same exclusive-create path; `csv_open()` refuses, none is touched), and
+`test_csv_open_returned_fp_writes_and_closes_normally` (four samples through
+`csv_write_sample()`, `csv_close()`, then the file is read back and its row count and first
+row checked).
+
+**Verified.** `datalogger\build.bat` rebuilds `rtde_fallback_monitor.exe` clean, no warnings
+under `-Wall -Wextra` (after killing a stale running copy that was holding the old `.exe`
+locked). `datalogger\tests\build_and_run_tests.bat`: 505 checks, 0 failures (283 before,
++222 across the four new tests), confirmed stable over three more consecutive re-runs. One
+run in between the first pass and the stability re-runs hit 2 failures in
+`test_csv_open_ordinary_progression_is_unchanged`, both `CHECK_STR` lines comparing the
+`_1`/`_2` suffix path: this is the same wall-clock-second dependency the file's own Group
+D-ter comment already documents for `csv_open()`'s existing ordinary-progression test
+(`csv_open()` takes its stamp from `time(NULL)` with no injectable clock, and three
+back-to-back calls occasionally straddle a second boundary) - not a regression from this
+change, and not the "known-flaky socket test" mentioned in the session's own instructions.
+Three consecutive full re-runs afterwards passed at 505/0. The Python suite was not run
+(no Python touched).
 
 Same split as [`plan_acq_datalogger.md`](plan_acq_datalogger.md) §0-bis: the corrections
 themselves are small and mechanical enough for a Sonnet subagent, **except F1**, where the
