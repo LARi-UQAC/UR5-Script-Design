@@ -16,6 +16,7 @@ than filling a lab CSV with plausible wrong numbers.
 
 from __future__ import annotations
 
+import bisect
 import struct
 from typing import Sequence
 
@@ -167,3 +168,50 @@ class RunStateMachine:
                 self._state = self._pending
                 self._pending = None
         return state
+
+
+def interpolate_pose(
+    poses: Sequence[Sequence[float]],
+    times: Sequence[float],
+    t: float,
+) -> tuple[float, ...]:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Sample the trajectory at an arbitrary time. The trajectory exists only
+        every DT (0.05 s, 20 Hz) but the emulator emits at 125 Hz, so the
+        intermediate points have to be built here - exactly what a controller
+        does between waypoints.
+
+        Translation is linearly interpolated. Orientation is taken from the
+        nearer frame rather than interpolated: the exported trajectory holds
+        orientation constant within a cycle, so interpolating it buys nothing
+        and would pull in a rotation library this module deliberately avoids.
+
+    Inputs:
+        poses (Sequence[Sequence[float]]): per-frame (x, y, z, rx, ry, rz).
+        times (Sequence[float]): ascending frame times, same length as poses.
+        t (float): wanted time, seconds. Clamped to the trajectory span.
+
+    Outputs:
+        pose (tuple[float, ...]): 6 values at time t.
+    --------------------------------------------------------------------------
+    """
+    if len(poses) == 1 or t <= times[0]:
+        return tuple(poses[0])
+    if t >= times[-1]:
+        return tuple(poses[-1])
+
+    i = bisect.bisect_right(times, t) - 1
+    i = min(max(i, 0), len(poses) - 2)
+    span = times[i + 1] - times[i]
+    alpha = 0.0 if span <= 0.0 else (t - times[i]) / span
+
+    a, b = poses[i], poses[i + 1]
+    nearer = a if alpha < 0.5 else b
+    return (
+        a[0] + (b[0] - a[0]) * alpha,
+        a[1] + (b[1] - a[1]) * alpha,
+        a[2] + (b[2] - a[2]) * alpha,
+        nearer[3], nearer[4], nearer[5],
+    )

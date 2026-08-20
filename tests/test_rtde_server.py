@@ -158,5 +158,56 @@ class RunStateMachineTests(unittest.TestCase):
         )
 
 
+class InterpolationTests(unittest.TestCase):
+    """
+    Translation is interpolated; orientation is taken from the nearest frame,
+    because the exported trajectory holds orientation constant within a cycle.
+    """
+
+    POSES = [
+        (0.0, 0.0, 0.0, 0.0, -3.1416, 0.0),
+        (1.0, 2.0, 3.0, 0.0, -3.1416, 0.0),
+        (2.0, 4.0, 6.0, 0.0, -3.0000, 0.0),
+    ]
+    TIMES = [0.0, 0.05, 0.10]
+
+    def test_exact_frame_times_return_that_frame(self) -> None:
+        for i, t in enumerate(self.TIMES):
+            got = rs.interpolate_pose(self.POSES, self.TIMES, t)
+            self.assertEqual(tuple(got), tuple(self.POSES[i]))
+
+    def test_midpoint_translation_is_the_average(self) -> None:
+        got = rs.interpolate_pose(self.POSES, self.TIMES, 0.025)
+        self.assertAlmostEqual(got[0], 0.5, places=9)
+        self.assertAlmostEqual(got[1], 1.0, places=9)
+        self.assertAlmostEqual(got[2], 1.5, places=9)
+
+    def test_quarter_point_translation(self) -> None:
+        got = rs.interpolate_pose(self.POSES, self.TIMES, 0.0625)
+        self.assertAlmostEqual(got[0], 1.25, places=9)
+        self.assertAlmostEqual(got[1], 2.50, places=9)
+        self.assertAlmostEqual(got[2], 3.75, places=9)
+
+    def test_orientation_comes_from_the_nearer_frame(self) -> None:
+        before_half = rs.interpolate_pose(self.POSES, self.TIMES, 0.060)
+        after_half = rs.interpolate_pose(self.POSES, self.TIMES, 0.090)
+        self.assertAlmostEqual(before_half[4], -3.1416, places=9)
+        self.assertAlmostEqual(after_half[4], -3.0000, places=9)
+
+    def test_clamps_outside_the_trajectory(self) -> None:
+        self.assertEqual(
+            tuple(rs.interpolate_pose(self.POSES, self.TIMES, -5.0)),
+            tuple(self.POSES[0]),
+        )
+        self.assertEqual(
+            tuple(rs.interpolate_pose(self.POSES, self.TIMES, 99.0)),
+            tuple(self.POSES[-1]),
+        )
+
+    def test_single_frame_trajectory(self) -> None:
+        got = rs.interpolate_pose([self.POSES[0]], [0.0], 1.0)
+        self.assertEqual(tuple(got), tuple(self.POSES[0]))
+
+
 if __name__ == "__main__":
     unittest.main()
