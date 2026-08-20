@@ -25,6 +25,7 @@
 # Repo bookkeeping files carry no extension of their own.
 .gitattributes text eol=lf
 .gitignore text eol=lf
+.gitkeep text eol=lf
 
 # Binary mesh / image / archive formats: never let git compute a text diff
 # or rewrite a byte of these on checkout.
