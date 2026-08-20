@@ -5,7 +5,8 @@ Responsabilités :
   - Crée la figure et les axes (XYZ vs temps, trajectoire XY).
   - Ajoute l'empreinte de la surface de test, les marques de mesure et les
     étoiles de sondage.
-  - Instancie les widgets (RadioButtons, Boutons START/STOP, Reouvrir 3D).
+  - Instancie les widgets (RadioButtons, boutons START/STOP, PAUSE/RESUME,
+    Reouvrir 3D).
   - Retourne un dictionnaire `display` avec tous les handles d'artistes.
   - Met à jour ces artistes à chaque frame.
 
@@ -64,8 +65,8 @@ def build_display(
 
     Outputs:
         display (dict): fig, ax_xyz, ax_xy, times, line_x/y/z, cycle_xy_lines,
-            xy_now, sim_text, status_text, radio, btn, swift_btn, labels,
-            cycle_palette, max_palette_cycles.
+            xy_now, sim_text, status_text, radio, btn, pause_btn,
+            swift_btn, labels, cycle_palette, max_palette_cycles.
     --------------------------------------------------------------------------
     """
     times = np.arange(n_frames) * dt
@@ -192,8 +193,13 @@ def build_display(
     for label_widget in radio.labels:
         label_widget.set_fontsize(8)
 
-    button_ax = fig.add_axes([0.80, 0.40, 0.18, 0.06])
+    # START/STOP et PAUSE partagent la meme rangee : STOP jette le temps
+    # ecoule (le prochain START rejoue depuis la frame 0), PAUSE le conserve.
+    button_ax = fig.add_axes([0.80, 0.40, 0.087, 0.06])
     btn = Button(button_ax, "START", color="#cce5cc", hovercolor="#a6d6a6")
+
+    pause_btn_ax = fig.add_axes([0.893, 0.40, 0.087, 0.06])
+    pause_btn = Button(pause_btn_ax, "PAUSE", color="#ffe0b0", hovercolor="#f5c98a")
 
     status_text = fig.text(
         0.80, 0.36, "STATE = STOP", fontsize=10, family="monospace", color="#a02020",
@@ -221,6 +227,7 @@ def build_display(
         "status_text": status_text,
         "radio": radio,
         "btn": btn,
+        "pause_btn": pause_btn,
         "swift_btn": swift_btn,
         "labels": labels,
         "cycle_palette": cycle_palette,

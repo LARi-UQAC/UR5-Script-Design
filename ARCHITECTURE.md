@@ -269,6 +269,8 @@ python -m unittest discover -s tests -p "test_*.py"
 | `test_limits.py` | joint / speed limits |
 | `test_force_target_filter.py` | recontact-depth deviation filtering (section 5) |
 | `test_udp_ipc.py` | UDP frame round-trip (section 7) |
+| `test_playback_clock.py` | `PlaybackClock`: PAUSE banks elapsed sim time, STOP discards it |
+| `test_viewer_pause.py` | the PAUSE control through the real viewer callbacks, headless (Agg + faked `perf_counter`, `env=None`) |
 | `test_probe_sim.py` | parked with the 3-point probe (section 6) |
 | `test_settings.py` | `Settings.to_overrides` / `from_file` / `save` round-trip, each dataclass default equal to its `design/params.py` constant, and out-of-bounds values rejected with the TCP-speed clamps applied and reported |
 | `test_export_settings.py` | `_build_urscript_lines()` at default settings matches `tests/fixtures/golden_headless.script` byte for byte, the recipe block included since it is now deterministic; a changed `Settings` field actually changes the generated script; the recipe block is emitted even at pure defaults and carries no date |

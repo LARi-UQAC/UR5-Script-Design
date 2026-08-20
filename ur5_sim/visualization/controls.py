@@ -1,8 +1,12 @@
 """
 ur5_sim/visualization/controls.py - rappels des widgets de lecture du viewer.
 
-START / STOP, le selecteur de configuration IK et le bouton « Reouvrir 3D ».
-Ces six fermetures etaient inlinees dans `viewer.visualize` ; elles vivent ici
+START / STOP, PAUSE / RESUME, le selecteur de configuration IK et le bouton
+« Reouvrir 3D ». STOP jette le temps ecoule (le prochain START rejoue depuis
+la frame 0, comportement documente de longue date) ; PAUSE le banque dans
+`paused_sim_t` pour que RESUME reprenne ou la lecture s'est arretee. La regle
+elle-meme est enoncee et testee dans `playback_clock.PlaybackClock`.
+Ces fermetures etaient inlinees dans `viewer.visualize` ; elles vivent ici
 parce qu'elles forment la surface de commande de la lecture, distincte de la
 pompe a frames (`playback.py`) et de la construction des artistes
 (`mpl_display.py`).
@@ -21,6 +25,7 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 
+from ur5_sim.config import SIM_SPEED
 from ur5_sim.visualization.mpl_display import clear_frame_artists
 from ur5_sim.visualization.recompute import recompute_all_branches
 from ur5_sim.visualization.swift_scene import reopen_swift_tab
@@ -40,8 +45,9 @@ def build_controls(core: dict[str, Any]) -> dict[str, Any]:
             functions.
 
     Outputs:
-        controls (dict): set_stop, set_start, reset_playback_to_start,
-            on_radio, on_button, on_swift_btn.
+        controls (dict): set_stop, set_start, set_pause,
+            reset_playback_to_start, on_radio, on_button,
+            on_pause_button, on_swift_btn.
     --------------------------------------------------------------------------
     """
     state = core["state"]
@@ -51,6 +57,7 @@ def build_controls(core: dict[str, Any]) -> dict[str, Any]:
     sim_text = display["sim_text"]
     status_text = display["status_text"]
     btn = display["btn"]
+    pause_btn = display["pause_btn"]
     labels = display["labels"]
 
     clock_t0 = core["clock_t0"]
@@ -76,6 +83,8 @@ def build_controls(core: dict[str, Any]) -> dict[str, Any]:
         # STOP is always a hard stop; next START must restart from frame 0.
         paused_sim_t[0] = 0.0
         state["running"] = False
+        state["paused"] = False
+        pause_btn.label.set_text("PAUSE")
         btn.label.set_text("START")
         btn.color = "#cce5cc"
         btn.hovercolor = "#a6d6a6"
@@ -98,7 +107,10 @@ def build_controls(core: dict[str, Any]) -> dict[str, Any]:
         write_hud(0, 0.0)
 
     def set_start() -> None:
+        # Deliberately does NOT reset paused_sim_t: a RESUME must keep the
+        # simulation time banked by set_pause. Only set_stop discards it.
         state["running"] = True
+        state["paused"] = False
         clock_t0[0] = time.perf_counter()
         last_wall[0] = None
         dt_real_window.clear()
@@ -109,6 +121,30 @@ def build_controls(core: dict[str, Any]) -> dict[str, Any]:
         btn.hovercolor = "#e89999"
         status_text.set_text("STATE = RUN")
         status_text.set_color("#207020")
+
+    def set_pause() -> None:
+        # PAUSE keeps the run alive: paused_sim_t banks the elapsed sim time so
+        # RESUME continues instead of replaying. STOP still discards it.
+        if not state["running"]:
+            return
+        paused_sim_t[0] = (time.perf_counter() - clock_t0[0]) * SIM_SPEED + paused_sim_t[0]
+        state["running"] = False
+        state["paused"] = True
+        pause_btn.label.set_text("RESUME")
+        status_text.set_text("STATE = PAUSE")
+        status_text.set_color("#a06000")
+        # Task 7 of plan_rtde_emulator.md publishes the run state to the RTDE
+        # emulator from here. Nothing is called yet: that hook does not exist
+        # in this repo, and a PAUSE must not raise inside a widget callback.
+
+    def on_pause_button(_event) -> None:
+        if state["running"]:
+            set_pause()
+        elif state.get("paused"):
+            state["paused"] = False
+            pause_btn.label.set_text("PAUSE")
+            set_start()
+        fig.canvas.draw_idle()
 
     def on_radio(label: str) -> None:
         if recompute["active"]:
@@ -130,8 +166,11 @@ def build_controls(core: dict[str, Any]) -> dict[str, Any]:
         fig.canvas.draw_idle()
 
     def on_button(_event) -> None:
-        # STOP branch: a running playback is halted immediately.
-        if state["running"]:
+        # STOP branch: a running playback is halted immediately. A PAUSED run
+        # counts as running here - the button still reads STOP, and set_pause
+        # left state["running"] False, so testing that flag alone would send a
+        # STOP click down the START path and silently restart the trajectory.
+        if state["running"] or state.get("paused"):
             set_stop()
             write_hud(0, 0.0)
             fig.canvas.draw_idle()
@@ -176,8 +215,10 @@ def build_controls(core: dict[str, Any]) -> dict[str, Any]:
     return {
         "set_stop": set_stop,
         "set_start": set_start,
+        "set_pause": set_pause,
         "reset_playback_to_start": reset_playback_to_start,
         "on_radio": on_radio,
         "on_button": on_button,
+        "on_pause_button": on_pause_button,
         "on_swift_btn": on_swift_btn,
     }

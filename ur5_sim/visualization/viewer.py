@@ -8,7 +8,7 @@ Architecture
   camera control natively (orbit/pan/zoom).
 * **matplotlib (native window)** - keeps the two 2D panels (XYZ vs time
   and XY trail), the configuration selector (IK branches), the START/STOP
-  toggle, and the HUD text.
+  toggle, the PAUSE/RESUME toggle, and the HUD text.
 
 Compute stage assembles a per-frame buffer of TCP positions and joint
 configurations once per selected IK branch. Display stage is wall-clock
@@ -17,7 +17,9 @@ updates the matplotlib line data. Slow renders drop frames instead of
 stalling the simulation clock.
 
 The simulation starts in the STOP state; the user must click START to
-begin the playback.
+begin the playback. PAUSE holds it without ending the run (RESUME
+continues where it stopped); STOP ends it, and the next START replays
+from frame 0.
 
 This file is the assembly point only. The work lives in five siblings, one
 per concern, so no single file passes the workspace file-size ceiling:
@@ -28,8 +30,8 @@ per concern, so no single file passes the workspace file-size ceiling:
   widgets, and the per-frame artist repaint.
 * :mod:`ur5_sim.visualization.playback` - trajectory buffer, wall clock,
   HUD, and the matplotlib timer callback.
-* :mod:`ur5_sim.visualization.controls` - the START / STOP / configuration
-  widget callbacks.
+* :mod:`ur5_sim.visualization.controls` - the START / STOP,
+  PAUSE / RESUME and configuration widget callbacks.
 * :mod:`ur5_sim.visualization.ipc_live` - the UDP loopback status feed to
   the design UI.
 """
@@ -139,6 +141,7 @@ def visualize(
 
     display["radio"].on_clicked(playback["on_radio"])
     display["btn"].on_clicked(playback["on_button"])
+    display["pause_btn"].on_clicked(playback["on_pause_button"])
     display["swift_btn"].on_clicked(playback["on_swift_btn"])
 
     # Navigation souris sur la vue X-Y (vue dessus) uniquement : molette = zoom

@@ -1,19 +1,14 @@
 """
 ur5_sim/visualization/playback.py - horloge, etat de lecture et pompe a frames.
 
-Ce module tient la moitie « cadence et etat » de l'ancien viewer.py : le
-tampon par branche IK, l'horloge murale, le rendu par frame, le HUD et le
-rappel du timer matplotlib.
-
-Le decoupage suit les seams du fichier d'origine : `mpl_display.py` construit
-et repeint les artistes, `swift_scene.py` monte et alimente la scene 3D,
-`ipc_live.py` publie l'etat TCP au design UI, `controls.py` porte les rappels
-des boutons, et `viewer.visualize` ne fait plus que cabler le tout.
+La moitie « cadence et etat » de l'ancien viewer.py : tampon par branche IK,
+horloge murale, rendu par frame, HUD, rappel du timer matplotlib. Les autres
+moities sont `mpl_display.py` (artistes), `swift_scene.py` (scene 3D),
+`ipc_live.py` (feed UDP) et `controls.py` (rappels des boutons).
 
 Les fermetures restent des fermetures et partagent l'etat comme avant ; elles
 sont simplement construites ici par `build_playback`. Les cellules d'horloge
-sont des listes d'un element, donc `controls.py` les mute a travers le
-dictionnaire `core`.
+sont des listes d'un element, donc `controls.py` les mute a travers `core`.
 """
 
 from __future__ import annotations
@@ -58,26 +53,23 @@ def build_playback(
     """
     --------------------------------------------------------------------------
     Purpose:
-        Build the animation closures of the viewer, bound to the Swift scene
-        and the matplotlib artists, and compute the first trajectory buffer
-        before returning, as the viewer always did.
+        Build the animation closures, bound to the Swift scene and the
+        matplotlib artists, and compute the first trajectory buffer before
+        returning, as the viewer always did.
 
     Inputs:
-        robot: roboticstoolbox UR5 model.
-        trajectories (list): (label, joint_trajectory) pairs, one per IK
-            branch. Mutated in place when a recompute lands.
-        dt (float): nominal time step, seconds.
-        surface (dict | None): surface frame, or None.
-        cycle_per_frame (list[int]): 1-based URScript cycle per frame.
-        plate_xy_per_frame (list[tuple]): script pose in the P_ANCHOR_OLD frame.
-        in_contact_per_frame (list[bool]): inside a force_mode block.
+        robot, trajectories, dt, surface: as taken by viewer.visualize;
+            trajectories is mutated in place when a recompute lands.
+        cycle_per_frame, plate_xy_per_frame, in_contact_per_frame: per-frame
+            lists already fitted to the trajectory length.
         n_cycles_detected (int): number of cycles found in the script.
         scene (dict): handles from swift_scene.setup_swift_scene.
         display (dict): handles from mpl_display.build_display.
 
     Outputs:
-        playback (dict): tick, render_frame, write_hud, emit_idle_ipc, state,
-            plus the widget callbacks from controls.build_controls.
+        playback (dict): state, tick, set_start, set_stop, set_pause,
+            render_frame, write_hud, emit_idle_ipc, and the widget callbacks
+            on_radio / on_button / on_pause_button / on_swift_btn.
     --------------------------------------------------------------------------
     """
     env = scene["env"]
@@ -96,6 +88,9 @@ def build_playback(
     state = {
         "idx": 0,
         "running": False,
+        # PAUSE holds the run instead of ending it: paused_sim_t keeps the
+        # elapsed simulation time so RESUME continues where it stopped.
+        "paused": False,
         "trajectory": None,
         "tcp_pts": None,
         "xs": None, "ys": None, "zs": None,
@@ -218,7 +213,13 @@ def build_playback(
     def write_hud(frame: int, sim_elapsed: float) -> None:
         run_flag = "RUN " if state["running"] else "STOP"
         cfg_label = trajectories[state["idx"]][0]
-        wall_elapsed = (time.perf_counter() - clock_t0[0]) if state["running"] else paused_sim_t[0]
+        # PC t counts the time this run has been playing, pauses excluded, so
+        # it stays comparable with SIM t and `delta` keeps meaning drift. Before
+        # PAUSE existed paused_sim_t was always 0 and this read the same value.
+        wall_elapsed = (
+            (time.perf_counter() - clock_t0[0]) + paused_sim_t[0]
+            if state["running"] else paused_sim_t[0]
+        )
         sync_err_ms = (wall_elapsed - sim_elapsed) * 1000.0
         backend_tag = "Swift" if env is not None else "2D"
         current_cycle = cycle_per_frame[frame] if frame < len(cycle_per_frame) else 0
@@ -377,10 +378,16 @@ def build_playback(
     return {
         "state": state,
         "tick": tick,
+        # The run-state transitions, exported so a caller can drive playback
+        # without synthesising a widget click.
+        "set_start": controls["set_start"],
+        "set_stop": controls["set_stop"],
+        "set_pause": controls["set_pause"],
         "render_frame": render_frame,
         "write_hud": write_hud,
         "on_radio": controls["on_radio"],
         "on_button": controls["on_button"],
+        "on_pause_button": controls["on_pause_button"],
         "on_swift_btn": controls["on_swift_btn"],
         "emit_idle_ipc": emit_idle_ipc,
     }

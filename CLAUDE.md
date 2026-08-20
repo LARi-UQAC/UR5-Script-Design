@@ -155,6 +155,8 @@ Stdlib `unittest`, no `conftest.py`, no pytest plugins. Tests live in `tests/`:
 - `test_motion_segments.py` covers segment densification; `test_limits.py` covers joint and TCP-speed limits.
 - `test_force_target_filter.py` covers the recontact-depth deviation filter.
 - `test_udp_ipc.py` covers the UDP frame round-trip.
+- `test_playback_clock.py` covers `PlaybackClock`: PAUSE keeps elapsed simulation time, STOP discards it so the next START replays from frame 0.
+- `test_viewer_pause.py` drives the real viewer callbacks headless (Agg backend, `time.perf_counter` faked, `env=None`) to pin the same three rules through the widgets: freeze, resume-not-replay, STOP-discards, plus the PAUSE/RESUME label and the HUD drift field. No window opens.
 - `test_probe_sim.py` is parked with the disabled 3-point probe (see ARCHITECTURE.md, section 6).
 - `test_settings.py`, `test_export_settings.py`, `test_sim_reads_settings.py`, `test_settings_persistence.py`, and `test_ui_settings.py` cover the settings layer: `Settings` round-trip and bounds, byte-identity of a default export against `tests/fixtures/golden_headless.script`, `ur5_sim/config.py` reflecting `etalement_settings.json`, the versioned example file and the startup banner, and settings-window value capture on an unmapped Tk root (no Playwright - see `docs/superpower/plans/plan_variables_UI.md`, section 5.1). Full detail in ARCHITECTURE.md, section 9.
 

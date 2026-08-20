@@ -2,9 +2,16 @@
 
 ## What is left to do (read this first)
 
-Status at 2026-08-16, on `main`. Twelve of the fifteen entries are fixed and verified;
-**three remain**, and they are the only ones. Each line says who it waits on and why, so
-nobody has to read the whole file to find the work.
+Status at 2026-08-20, on `main`. Fourteen of the fifteen entries are fixed and verified;
+**one remains**. Each line says who it waits on and why, so nobody has to read the whole
+file to find the work.
+
+F6 and F7 closed on 2026-08-20, together, in `plan_rtde_emulator.md` task 6, and in that
+order: `viewer.py` was split into seven modules first, in a commit that changed no
+behaviour, and PAUSE was added to the split file second. Read both entries before touching
+the viewer. The Python half of F6 is done; the C half (`rtde_fallback_monitor.c`, 909 lines,
+and its 1118-line test) is still only measured, not decided, and is folded into F15's
+session since it touches the same file.
 
 F10 closed on 2026-08-16. Its configuration turned out to be recoverable rather than lost:
 the committed `etalement.script` was reproduced byte for byte, its recipe is now emitted in
@@ -14,8 +21,6 @@ aligned on it. Read the F10 entry before touching export or the golden fixture.
 | # | Sev. | Model | What is left | Waits on |
 |---|---|---|---|---|
 | **F15** | Low | **Sonnet**, the specification is already written; Opus reviews the diff and runs the harness | The only entry still fully open. `csv_open()` picks a free name with `file_exists()` then opens it with `fopen(..., "wb")`, which creates **or truncates**: another writer taking the name in that gap loses its file silently. Correction and four test cases are written out in the entry, including that it must compose with F14 rather than replace it. | A session with budget for a careful C change. Deliberately not rushed: it rewrites the file-creation path of the only data recorder. |
-| **F6** | Low | **Opus.** Naming the seam is a module-boundary judgement on a file no test covers, and the result is only checkable by launching the viewer | `ur5_sim/visualization/viewer.py` is 916 lines, over the workspace file-size ceiling that `spec_rtde_emulator.md` itself claims to respect. Deferred by operator decision on 2026-08-16, not skipped. | The session implementing `plan_rtde_emulator.md` task 6, which must reopen this file anyway to add PAUSE, and which will have a way to exercise the viewer end to end. Splitting it twice would be two risky passes on an untested GUI file. |
-| **F7** | Low | Whatever `plan_rtde_emulator.md` task 6 assigns; do not re-decide it here | `paused_sim_t` is dead (written `0.0` everywhere, read twice) and no PAUSE exists in the viewer. Not to be fixed here. | Already scheduled as task 6 of `plan_rtde_emulator.md`. Listed only so this audit is complete; opening a second correction would duplicate it. |
 
 Everything else - F1 to F5, F8 to F14 - is corrected, with tests, and verified by a
 full run: 198 Python tests, 275 C checks, `python -m ur5_sim --check` clean, `pip-audit`
@@ -288,6 +293,27 @@ management, matplotlib panel assembly, and Swift scene wiring. Do this **before*
 one unreviewable diff. For the C files, note the measurement and decide, rather than assume
 the rule does not apply.
 
+**Outcome (2026-08-20), Python half done.** Split in its own commit, before PAUSE, as
+required. The seam turned out to be half cut already: `mpl_display.py` existed but nothing
+imported it, and it had drifted from what `viewer.py` actually drew (no probe stars, legend
+built before the overlays instead of after). It is now the real panel builder. The result,
+in characters against the 16384-char ceiling (`context_budget.py` estimates at 4 chars per
+token): `viewer.py` 7.1k (43%), `playback.py` 15.5k (94%), `swift_scene.py` 14.9k (90%),
+`mpl_display.py` 11.7k (71%), `controls.py` 8.4k (51%), `ipc_live.py` 5.0k (30%),
+`recompute.py` 4.8k (29%), `playback_clock.py` 1.9k (11%). Every file is under, but
+`playback.py` and `swift_scene.py` are close enough that the next change to either should
+land elsewhere or carve again: in `playback.py` the recompute-polling branch of `tick`
+belongs with `recompute.py`, and in `swift_scene.py` the end-effector mesh attachment is a
+second natural seam. Bodies were moved, not rewritten; the closures are still closures,
+built by `build_playback` / `build_controls`, with the clock cells kept as one-element
+lists so both sides mutate the same object. Verified by 253 tests green and a
+`python -m ur5_sim --check` byte-identical to the pre-split run apart from its own
+timestamp line.
+
+**Still open: the C half.** `datalogger/rtde_fallback_monitor.c` (909 lines) and
+`datalogger/tests/test_rtde_fallback_monitor.c` (1118) are unchanged. Decide rather than
+assume, and do it in the F15 session, which opens that file anyway.
+
 **Potential tests** (`tests/test_file_size_ceiling.py`):
 
 1. Every tracked `.py` under `design/` and `ur5_sim/` is under the ceiling, with the offender
@@ -315,6 +341,26 @@ correction for it**; if that branch is abandoned, move this entry up into the ac
 **Potential tests** (owned by that plan, restated so they are not lost): pause freezes
 simulation time while controller time keeps advancing; resume continues from the frozen
 frame rather than frame 0; a pause does not split the monitor's CSV file.
+
+**Outcome (2026-08-20), closed by task 6.** `paused_sim_t` is live: a PAUSE / RESUME button
+sits beside START / STOP, `set_pause` banks the elapsed simulation time into it, and
+`set_start` deliberately does not clear it, so RESUME continues where the run stopped while
+STOP still discards it. Two tests, not the one the entry expected, because the assumption
+that this could only be checked by launching the visualizer turned out to be false:
+`tests/test_playback_clock.py` states the rule in isolation on a matplotlib-free
+`PlaybackClock`, and `tests/test_viewer_pause.py` drives the real widget callbacks headless
+(Agg backend, `time.perf_counter` replaced by a counter the test steps, `env=None`) and
+asserts exact numbers - freeze across a 4.4 s wall-clock gap, resume at 0.60 banked + 0.15
+played, STOP discarding the 0.60. The third test in the list, that a pause does not split
+the monitor's CSV, is not here: it needs the RTDE emulator connected to the viewer, which is
+task 7.
+
+Two defects were found while wiring it, both fixed in the same commit. The HUD's `PC t`
+field read wall time since the clock anchor, so after any resume `delta` sat at minus the
+banked time forever and stopped meaning frame drift; it now excludes the pause, which is a
+no-op for a run that never paused. And `on_button` branched on `state["running"]` alone, so
+a STOP click while paused - on a button still reading STOP - fell through to the START path
+and silently restarted the trajectory; a paused run now counts as running there.
 
 ---
 
