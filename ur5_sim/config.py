@@ -132,6 +132,20 @@ SIM_PROBE_RESIDUAL_TOL_M: float = 1e-5
 # 2 packets at 125 Hz is about 16 ms, the order a real CB3 takes.
 RTDE_EMU_TRANSITION_PACKETS: int = 2
 
+# Loopback only. Binding 0.0.0.0 would make the emulator reachable from the
+# lab VLAN, where it could be mistaken for the robot at 192.168.4.38.
+RTDE_EMU_HOST: str = "127.0.0.1"
+
+# The controller's real RTDE port, so the monitor's command line is identical
+# to the one used in the lab.
+RTDE_EMU_PORT: int = 30004
+
+# CB3 control-loop rate.
+RTDE_EMU_RATE_HZ: float = 125.0
+
+# STOPPED dwell between consecutive --runs, and the hold of --pause-at.
+RTDE_EMU_IDLE_S: float = 1.0
+
 # --------------------------------------------------------------------------
 # FT-300 force surrogate for the RTDE emulator.
 #

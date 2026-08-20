@@ -6,7 +6,9 @@ by necessity (two languages, one protocol). Pinning it from both sides turns a
 silent drift into a failing test instead of wrong numbers in a lab CSV.
 """
 
+import socket
 import struct
+import time
 import unittest
 
 from ur5_sim import rtde_server as rs
@@ -207,6 +209,179 @@ class InterpolationTests(unittest.TestCase):
     def test_single_frame_trajectory(self) -> None:
         got = rs.interpolate_pose([self.POSES[0]], [0.0], 1.0)
         self.assertEqual(tuple(got), tuple(self.POSES[0]))
+
+
+class _FakeMonitor:
+    """Minimal client that performs the handshake the C monitor performs."""
+
+    def __init__(self, port: int, protocol_version: int = 2) -> None:
+        self.sock = socket.create_connection(("127.0.0.1", port), timeout=5.0)
+        self.sock.settimeout(5.0)
+        self.protocol_version = protocol_version
+        self.recipe_id = 0
+
+    def _recv_exactly(self, n: int) -> bytes:
+        buf = b""
+        while len(buf) < n:
+            chunk = self.sock.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("server closed")
+            buf += chunk
+        return buf
+
+    def recv_packet(self) -> tuple:
+        head = self._recv_exactly(rs.RTDE_HEADER_SIZE)
+        size, pkg_type = struct.unpack(">HB", head)
+        return pkg_type, self._recv_exactly(size - rs.RTDE_HEADER_SIZE)
+
+    def handshake(self) -> None:
+        self.sock.sendall(rs.encode_packet(
+            rs.RTDE_REQUEST_PROTOCOL_VERSION,
+            struct.pack(">H", self.protocol_version)))
+        pkg_type, body = self.recv_packet()
+        assert pkg_type == rs.RTDE_REQUEST_PROTOCOL_VERSION and body[0] == 1
+
+        payload = b""
+        if self.protocol_version >= 2:
+            payload += struct.pack(">d", 125.0)
+        payload += rs.RTDE_OUTPUT_RECIPE.encode("ascii")
+        self.sock.sendall(
+            rs.encode_packet(rs.RTDE_CONTROL_PACKAGE_SETUP_OUTPUTS, payload))
+        pkg_type, body = self.recv_packet()
+        assert pkg_type == rs.RTDE_CONTROL_PACKAGE_SETUP_OUTPUTS
+        if self.protocol_version >= 2:
+            self.recipe_id = body[0]
+            types = body[1:].decode("ascii")
+        else:
+            types = body.decode("ascii")
+        assert types == rs.RTDE_OUTPUT_TYPES, types
+
+        self.sock.sendall(rs.encode_packet(rs.RTDE_CONTROL_PACKAGE_START, b""))
+        pkg_type, body = self.recv_packet()
+        assert pkg_type == rs.RTDE_CONTROL_PACKAGE_START and body[0] == 1
+
+    def next_sample(self) -> tuple:
+        """Return (timestamp, pose6, force6, runtime_state) of the next frame."""
+        while True:
+            pkg_type, body = self.recv_packet()
+            if pkg_type != rs.RTDE_DATA_PACKAGE:
+                continue
+            if self.protocol_version >= 2:
+                body = body[1:]
+            values = struct.unpack(">d6d6dI", body)
+            return values[0], values[1:7], values[7:13], values[13]
+
+    def close(self) -> None:
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+class RtdeServerTests(unittest.TestCase):
+
+    POSES = [(float(i) * 0.01, 0.0, 0.3, 0.0, -3.1416, 0.0) for i in range(20)]
+    TIMES = [i * 0.05 for i in range(20)]
+
+    def _server(self) -> "rs.RtdeServer":
+        server = rs.RtdeServer(host="127.0.0.1", port=0, rate_hz=125.0)
+        self.assertTrue(server.start())
+        self.addCleanup(server.stop)
+        server.load_run(
+            poses=self.POSES,
+            times=self.TIMES,
+            in_contact=[True] * len(self.POSES),
+            penetration_m=[0.0] * len(self.POSES),
+        )
+        return server
+
+    def test_binds_loopback_only(self) -> None:
+        """It must be unreachable from the lab VLAN, never mistaken for a robot."""
+        server = self._server()
+        self.assertEqual(server.host, "127.0.0.1")
+
+    def test_handshake_then_streaming(self) -> None:
+        server = self._server()
+        client = _FakeMonitor(server.port)
+        self.addCleanup(client.close)
+        client.handshake()
+
+        ts0, pose, force, state = client.next_sample()
+        self.assertEqual(len(pose), 6)
+        self.assertEqual(len(force), 6)
+        self.assertEqual(state, rs.RT_STOPPED)
+
+        ts1, _, _, _ = client.next_sample()
+        self.assertGreater(ts1, ts0)
+
+    def test_protocol_version_1_is_accepted(self) -> None:
+        server = self._server()
+        client = _FakeMonitor(server.port, protocol_version=1)
+        self.addCleanup(client.close)
+        client.handshake()
+        _, _, _, state = client.next_sample()
+        self.assertEqual(state, rs.RT_STOPPED)
+
+    def test_stream_continues_while_stopped(self) -> None:
+        """The monitor needs a STOPPED packet to see the edge that opens a file."""
+        server = self._server()
+        client = _FakeMonitor(server.port)
+        self.addCleanup(client.close)
+        client.handshake()
+        for _ in range(5):
+            _, _, _, state = client.next_sample()
+            self.assertEqual(state, rs.RT_STOPPED)
+
+    def test_run_state_reaches_the_client(self) -> None:
+        server = self._server()
+        client = _FakeMonitor(server.port)
+        self.addCleanup(client.close)
+        client.handshake()
+        client.next_sample()
+
+        server.set_run_state(running=True, sim_time=0.0, finished=False)
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            _, _, _, state = client.next_sample()
+            if state == rs.RT_PLAYING:
+                break
+        else:
+            self.fail("never reached PLAYING")
+
+    def test_timestamp_advances_while_stopped(self) -> None:
+        """A real controller's clock does not stop when the program does."""
+        server = self._server()
+        client = _FakeMonitor(server.port)
+        self.addCleanup(client.close)
+        client.handshake()
+        first, _, _, _ = client.next_sample()
+        for _ in range(20):
+            last, _, _, _ = client.next_sample()
+        self.assertGreater(last, first)
+
+    def test_client_disconnect_does_not_kill_the_server(self) -> None:
+        server = self._server()
+        first = _FakeMonitor(server.port)
+        first.handshake()
+        first.close()
+
+        second = _FakeMonitor(server.port)
+        self.addCleanup(second.close)
+        second.handshake()
+        _, _, _, state = second.next_sample()
+        self.assertEqual(state, rs.RT_STOPPED)
+
+    def test_port_in_use_degrades_instead_of_raising(self) -> None:
+        """The visualizer must never be blocked by the emulator."""
+        first = self._server()
+        second = rs.RtdeServer(host="127.0.0.1", port=first.port, rate_hz=125.0)
+        self.addCleanup(second.stop)
+        self.assertFalse(second.start())
+
+    def test_stop_is_idempotent(self) -> None:
+        server = self._server()
+        server.stop()
+        server.stop()
 
 
 if __name__ == "__main__":
