@@ -132,6 +132,32 @@ SIM_PROBE_RESIDUAL_TOL_M: float = 1e-5
 # 2 packets at 125 Hz is about 16 ms, the order a real CB3 takes.
 RTDE_EMU_TRANSITION_PACKETS: int = 2
 
+# --------------------------------------------------------------------------
+# FT-300 force surrogate for the RTDE emulator.
+#
+# WARNING: these are PLAUSIBLE values, not measurements of this silicone
+# finger on this plate. They are isolated here so measured values can replace
+# them without touching any logic. Data produced with them resembles FT-300
+# output; it is not FT-300 output.
+# --------------------------------------------------------------------------
+
+# Contact stiffness of the silicone hemispheric finger. 4000 N/m places the
+# 6 N target at about 1.5 mm penetration.
+FORCE_MODEL_STIFFNESS_N_PER_M: float = 4000.0
+
+# First-order rise of the force_mode regulation.
+FORCE_MODEL_TAU_S: float = 0.05
+
+# Coulomb friction coefficient, silicone on a smooth plate.
+FORCE_MODEL_FRICTION_MU: float = 0.8
+
+# Sensor noise. The FT-300's stated resolution is 0.1 N; this sigma gives
+# roughly that peak to peak.
+FORCE_MODEL_NOISE_N: float = 0.05
+
+# Fixed so a recorded CSV is reproducible and --verify-csv is stable.
+FORCE_MODEL_SEED: int = 20260814
+
 
 def settings_summary() -> str:
     """
