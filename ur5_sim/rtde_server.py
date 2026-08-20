@@ -95,3 +95,75 @@ def encode_data_payload(
     --------------------------------------------------------------------------
     """
     return _PAYLOAD_STRUCT.pack(timestamp, *pose6, *force6, runtime_state)
+
+
+class RunStateMachine:
+    """
+    Program-execution state as the controller reports it.
+
+    Transitions are not instantaneous on a real CB3: a pause is PAUSING then
+    PAUSED, a resume is RESUMING then PLAYING, a stop is STOPPING then STOPPED.
+    Only a start is immediate. Reproducing that is what makes the monitor's
+    file-boundary logic face the real enum sequence rather than a simplified
+    two-state one.
+    """
+
+    def __init__(self, transition_packets: int = 2) -> None:
+        self._state: int = RT_STOPPED
+        self._pending: int | None = None
+        self._left: int = 0
+        self._transition_packets: int = max(1, int(transition_packets))
+
+    def request(self, target: int) -> None:
+        """
+        ----------------------------------------------------------------------
+        Purpose:
+            Ask for a stable state. Ignored when it is already current or
+            already pending, so a double-click cannot restart a transition.
+
+        Inputs:
+            target (int): RT_PLAYING, RT_PAUSED or RT_STOPPED.
+
+        Outputs:
+            None.
+        ----------------------------------------------------------------------
+        """
+        if target == self._state or target == self._pending:
+            return
+        if target == RT_PLAYING and self._state == RT_STOPPED:
+            self._state = RT_PLAYING
+            self._pending = None
+            self._left = 0
+        elif target == RT_PLAYING and self._state == RT_PAUSED:
+            self._begin(RT_RESUMING, RT_PLAYING)
+        elif target == RT_PAUSED and self._state == RT_PLAYING:
+            self._begin(RT_PAUSING, RT_PAUSED)
+        elif target == RT_STOPPED and self._state != RT_STOPPED:
+            self._begin(RT_STOPPING, RT_STOPPED)
+
+    def _begin(self, transient: int, final: int) -> None:
+        self._state = transient
+        self._pending = final
+        self._left = self._transition_packets
+
+    def next_state(self) -> int:
+        """
+        ----------------------------------------------------------------------
+        Purpose:
+            Return the state for the packet about to be sent, and advance any
+            transition. Call exactly once per emitted packet.
+
+        Inputs:
+            None.
+
+        Outputs:
+            state (int): the RT_* value to put in this packet.
+        ----------------------------------------------------------------------
+        """
+        state = self._state
+        if self._pending is not None:
+            self._left -= 1
+            if self._left <= 0:
+                self._state = self._pending
+                self._pending = None
+        return state

@@ -123,6 +123,15 @@ SIM_PROBE_TILT_MAX_RAD: float = _S.probe_tilt_max_rad    # synchronisé avec les
 # ramene pas le waypoint sur la plaque reelle - bug ou parametre incompatible.
 SIM_PROBE_RESIDUAL_TOL_M: float = 1e-5
 
+# --------------------------------------------------------------------------
+# RTDE emulator (simulation only; never reaches the exported script, so these
+# live here and not in design/params.py - same rule as SIM_PROBE_* above).
+# --------------------------------------------------------------------------
+
+# Packets spent in PAUSING / RESUMING / STOPPING before the stable state.
+# 2 packets at 125 Hz is about 16 ms, the order a real CB3 takes.
+RTDE_EMU_TRANSITION_PACKETS: int = 2
+
 
 def settings_summary() -> str:
     """

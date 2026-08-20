@@ -88,5 +88,75 @@ class EncoderTests(unittest.TestCase):
         )
 
 
+class RunStateMachineTests(unittest.TestCase):
+    """
+    A real controller passes through PAUSING / RESUMING / STOPPING rather than
+    jumping between the stable states. Emitting them drives the monitor through
+    the same enum sequence its own C suite asserts pair by pair.
+    """
+
+    def _drain(self, machine: "rs.RunStateMachine", n: int) -> list:
+        return [machine.next_state() for _ in range(n)]
+
+    def test_starts_stopped(self) -> None:
+        m = rs.RunStateMachine(transition_packets=2)
+        self.assertEqual(self._drain(m, 3), [rs.RT_STOPPED] * 3)
+
+    def test_start_goes_straight_to_playing(self) -> None:
+        m = rs.RunStateMachine(transition_packets=2)
+        m.request(rs.RT_PLAYING)
+        self.assertEqual(self._drain(m, 3), [rs.RT_PLAYING] * 3)
+
+    def test_pause_passes_through_pausing(self) -> None:
+        m = rs.RunStateMachine(transition_packets=2)
+        m.request(rs.RT_PLAYING)
+        m.next_state()
+        m.request(rs.RT_PAUSED)
+        self.assertEqual(
+            self._drain(m, 4),
+            [rs.RT_PAUSING, rs.RT_PAUSING, rs.RT_PAUSED, rs.RT_PAUSED],
+        )
+
+    def test_resume_passes_through_resuming(self) -> None:
+        m = rs.RunStateMachine(transition_packets=2)
+        m.request(rs.RT_PLAYING)
+        m.next_state()
+        m.request(rs.RT_PAUSED)
+        self._drain(m, 3)
+        m.request(rs.RT_PLAYING)
+        self.assertEqual(
+            self._drain(m, 4),
+            [rs.RT_RESUMING, rs.RT_RESUMING, rs.RT_PLAYING, rs.RT_PLAYING],
+        )
+
+    def test_stop_passes_through_stopping(self) -> None:
+        m = rs.RunStateMachine(transition_packets=2)
+        m.request(rs.RT_PLAYING)
+        m.next_state()
+        m.request(rs.RT_STOPPED)
+        self.assertEqual(
+            self._drain(m, 4),
+            [rs.RT_STOPPING, rs.RT_STOPPING, rs.RT_STOPPED, rs.RT_STOPPED],
+        )
+
+    def test_requesting_the_current_state_changes_nothing(self) -> None:
+        m = rs.RunStateMachine(transition_packets=2)
+        m.request(rs.RT_PLAYING)
+        m.next_state()
+        m.request(rs.RT_PLAYING)
+        self.assertEqual(self._drain(m, 2), [rs.RT_PLAYING] * 2)
+
+    def test_repeated_request_during_a_transition_is_ignored(self) -> None:
+        m = rs.RunStateMachine(transition_packets=2)
+        m.request(rs.RT_PLAYING)
+        m.next_state()
+        m.request(rs.RT_PAUSED)
+        m.request(rs.RT_PAUSED)      # operator double-click must not restart it
+        self.assertEqual(
+            self._drain(m, 4),
+            [rs.RT_PAUSING, rs.RT_PAUSING, rs.RT_PAUSED, rs.RT_PAUSED],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
