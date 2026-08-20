@@ -2,32 +2,51 @@
 
 ## What is left to do (read this first)
 
-Status at 2026-08-20, on `main`. **All fifteen entries are fixed and verified; none are
-still open.** F15, the last one, closed on 2026-08-20 in the same session that wrote this
-update: `csv_open()` now opens each candidate name with `CreateFileA(..., CREATE_NEW, ...)`
-wrapped into a `FILE*` (`_open_osfhandle` + `_fdopen`) instead of a `file_exists()` check
-followed by `fopen(..., "wb")`, so there is no window left for a second writer to take a
-name and get silently truncated. See the F15 entry below for the full account and how it
-was verified.
+Status at 2026-08-20, on `main`, written by the session that closed F16 and the C half of
+F6. **Sixteen entries now: F1 to F16 are fixed and verified; none is still open.** The text
+that stood here counted fifteen and said none was open. That stopped being true the moment
+F16 was appended below it, since F16 was logged after this section was last written, and it
+is a Medium rather than a hygiene item.
+
+F16 closed in this session, in two commits, in the order its own entry sets out. First the
+clock seam: `csv_open()` takes a `stamp_time` argument and `monitor_run_once()`, its one
+production caller, passes `time(NULL)` there, so the naming tests pin an exact stamp instead
+of racing the second boundary. Then the fake RTDE server: every close that follows a sent
+packet half-closes and drains to end of stream, because a Windows `closesocket()` can emit
+an RST and an RST discards what the peer has received but not yet read. The determinism is
+checkable rather than asserted: `build_and_run_tests.bat --repeat N` builds once, runs N
+times, and fails unless every run reproduces the first run's exit code and summary line.
+
+F15 closed on 2026-08-20 in the session before this one: `csv_open()` now opens each
+candidate name with `CreateFileA(..., CREATE_NEW, ...)` wrapped into a `FILE*`
+(`_open_osfhandle` + `_fdopen`) instead of a `file_exists()` check followed by
+`fopen(..., "wb")`, so there is no window left for a second writer to take a name and get
+silently truncated. See the F15 entry below for the full account and how it was verified.
 
 F6 and F7 closed on 2026-08-20, together, in `plan_rtde_emulator.md` task 6, and in that
 order: `viewer.py` was split into seven modules first, in a commit that changed no
 behaviour, and PAUSE was added to the split file second. Read both entries before touching
-the viewer. The Python half of F6 is done; the C half (`rtde_fallback_monitor.c` and its
-test) is still only measured, not decided. F15's session fixed only the race F15 itself
-names and did not take up the module-split question - that decision is still open and
-belongs to a session scoped for it, not to this one.
+the viewer. The Python half of F6 is done. The C half was decided in this session, in a
+commit that changed no behaviour and landed before the F16 fixes, for the same reason the
+viewer split landed before PAUSE: a split and a correction in one diff can be judged on
+neither. The decision went against
+splitting; the exemption and its reasoning are in `CLAUDE.md` and the account is in the F6
+entry. The line in that entry sending the work to F15's session is stale: F15's session
+fixed only the race F15 names and never took the question up.
 
 F10 closed on 2026-08-16. Its configuration turned out to be recoverable rather than lost:
 the committed `etalement.script` was reproduced byte for byte, its recipe is now emitted in
 every export, and the two `design/params.py` defaults that did not match the trial were
 aligned on it. Read the F10 entry before touching export or the golden fixture.
 
-Every entry in this register, F1 to F15, is corrected and has tests. F1 to F14 were last
+Every entry in this register, F1 to F16, is corrected and has tests. F1 to F14 were last
 verified together: 198 Python tests, 275 C checks (before F15), `python -m ur5_sim --check`
-clean, `pip-audit` clean. F15's session touched no Python, so it did not re-run the Python
-suite, `ur5_sim --check`, or `pip-audit`; it rebuilt and ran the C harness only, which now
-stands at 505 checks, 0 failures (283 before F15's four new tests).
+clean, `pip-audit` clean. The claim that stood here, that the Python suite had not been
+re-run since, is stale: it was re-run after F15's session and stands at 285 tests green.
+F15's session and this one both touched C only, so neither re-ran `ur5_sim --check` or
+`pip-audit`; both rebuilt the tool clean under `-Wall -Wextra` and ran the C harness, which
+now stands at 507 checks, 0 failures (505 before F16's new naming test), and at 40
+consecutive runs with an identical result.
 
 **How the model column was decided**, so it can be applied to entries added later rather
 than argued each time. Opus takes the work where the hard part is the decision: what an
@@ -316,6 +335,29 @@ timestamp line.
 **Still open: the C half.** `datalogger/rtde_fallback_monitor.c` (909 lines) and
 `datalogger/tests/test_rtde_fallback_monitor.c` (1118) are unchanged. Decide rather than
 assume, and do it in the F15 session, which opens that file anyway.
+
+**Status: FIXED on 2026-08-20, C half.** Decided, not deferred again, and the decision was
+to keep both files whole and write the exemption down. Measured first, against the
+16384-character ceiling: `rtde_fallback_monitor.c` 35667 characters (2.2x),
+`tests/test_rtde_fallback_monitor.c` 59896 (3.7x). Three routes were weighed. A real
+multi-unit split of the tool is possible only by giving some thirty internal functions
+external linkage, because the harness reaches them solely by including the translation unit
+and they are all `static`: that pays for a ceiling standing for module clarity by deleting
+the one module boundary the C language actually has. Textual `.inc` fragments keep `static`
+and put every file under the number, but produce fragments no compiler can check alone and
+no reviewer can read alone, which satisfies the metric while degrading what the metric
+measures. The third route, the exemption, is the one taken. It is written in
+[`CLAUDE.md`](../../../CLAUDE.md), section "Size ceiling: the two C files are exempt",
+with that reasoning and with the further point that the ceiling's stated origin does not
+reach here: it exists because the local-model bridge silently truncates an oversized
+prompt, and `datalogger/` is walled off from every local-model workflow by the paragraph
+above it. The exemption is not unconditional. What the ceiling protects that does apply, a
+reader finding a region without paging the whole file, is served by a "Sections, in file
+order" index now at the top of each C file, and CLAUDE.md makes keeping that index accurate
+the binding part. The exemption covers `datalogger/*.c` only, never Python, so potential
+test 3 above (skip the C sources until the decision is taken) is now simply "the C sources
+are out of scope", and potential tests 1 and 2 are unaffected. Verified as a no-behaviour
+change: comment-only diff, `dataloggeruild.bat` clean under `-Wall -Wextra`, harness green.
 
 **Potential tests** (`tests/test_file_size_ceiling.py`):
 
@@ -804,6 +846,60 @@ investigate, never as noise to re-run away.
 the harness 20 times in a row and require 20 identical results. Worth adding to
 `build_and_run_tests.bat` as an opt-in loop flag, so the determinism claim is checkable by
 anyone who doubts it.
+
+**Status: FIXED on 2026-08-20.** Both halves landed, in the order this entry sets, in two
+commits, after the F6 decision commit that changed no behaviour.
+
+*Measured before touching anything*, because a flake nobody has counted is a flake nobody
+can prove gone: the harness was built once and run 20 times in a row. Three runs failed, all
+of them source 1 and no other: `test_csv_open_refuses_when_all_100_names_are_taken` once and
+`test_csv_open_still_refuses_on_exhaustion` twice, each failing the two lines that require
+`csv_open()` to refuse. That is a 15 percent failure rate on identical input.
+
+*Half 1, the clock seam.* `csv_open()` gained a trailing `time_t stamp_time` and no longer
+calls `time(NULL)` itself; `monitor_run_once()`, the single production caller, passes
+`time(NULL)` at the call site, which is where the default belongs. A parameter was chosen
+over a function pointer or a settable file-scope hook so that no hidden state decides a
+filename. On the test side `compute_current_stamp()` became `stamp_for_time(time_t, ...)`,
+every `csv_open()` call passes one `FIXED_STAMP_TIME` constant, and each test derives its
+expected filename from that same value through the same `localtime()`/`strftime()` path, so
+the assertions are timezone-independent as well as clock-independent. One test was added,
+`test_csv_open_uses_the_injected_stamp`, which pins the seam itself: the opened file must
+carry exactly the name built from the injected stamp.
+
+*Half 2, the fake server.* The mechanism turned out to be more specific than "truncated or
+out of order" as guessed above. The server replied and then called `closesocket()`
+immediately; on Windows that close can be an RST, and an RST discards what the peer has
+received but not yet read, so the client could lose the `SETUP_OUTPUTS` reply it was about
+to parse. That produces exactly the pair of messages seen on 2026-08-20: the client reports
+`stream lost (10054)`, which is `WSAECONNRESET`, and `monitor_run_once()` returns
+`MON_ERR_STREAM` where `test_unsupported_field_aborts_before_logging` asserts
+`MON_ERR_HANDSHAKE`. The `NOT_FOUND` recipe in the same output is not a symptom at all: it
+is that test's own expected stdout. Every close that follows a sent packet now goes through
+`fake_close_gracefully()`, which half-closes with `shutdown(c, SD_SEND)` and drains to end
+of stream under a 2 s receive timeout before closing, so the client sees FIN only after it
+has consumed every byte before it. The one deliberate reset, the `abort_mid_stream` branch
+modelling a cable pull, stays a plain reset with `SO_LINGER {1,0}`: there the RST is the
+fault being modelled, and its comment now says so, so nobody "fixes" it later.
+
+*Honesty about half 2.* Source 1 was reproduced and is measured gone. Source 2 did not
+reproduce in the 20-run baseline, so its repair rests on the mechanism above matching the
+recorded evidence, not on a before-and-after count. It is a real hazard on that code path
+either way, and removing it can only narrow the failure surface.
+
+*The repetition gate.* `datalogger/tests/build_and_run_tests.bat` now takes `--repeat N`: it
+builds once, runs the harness N times, and fails unless every run reproduces the first run's
+exit code **and** its `NNN checks, N failure(s)` summary line. Identical results, not merely
+passing ones. With no argument its output and exit code are unchanged, so existing habits
+and the docs quoting them still hold; a malformed argument prints a usage line and exits 2.
+The gate was itself verified against a stub that alters the summary on run 3 and another
+that alters the exit code on run 3: both are caught, named by run number, and exit 1.
+
+*Verified.* `dataloggeruild.bat` rebuilds clean, no warning under `-Wall -Wextra`.
+`build_and_run_tests.bat --repeat 20`: `TESTS PASSED (20/20 identical: 507 checks, 0
+failure(s))`. A second campaign at `--repeat 40` gave `40/40 identical` at the same 507
+checks. No Python was touched, so the Python suite, `ur5_sim --check` and `pip-audit` were
+not re-run.
 
 ---
 
