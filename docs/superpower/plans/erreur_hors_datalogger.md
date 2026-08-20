@@ -758,6 +758,55 @@ change, and not the "known-flaky socket test" mentioned in the session's own ins
 Three consecutive full re-runs afterwards passed at 505/0. The Python suite was not run
 (no Python touched).
 
+## F16. The C harness fails intermittently, so its verdict is not a gate (Medium)
+
+**Audit basis.** Observed 2026-08-20 by the session driving
+[`plan_rtde_emulator.md`](plan_rtde_emulator.md), while running the harness itself as the
+acceptance step for Task 9 and F15. Not found by reading code: found because the same
+command gave two different answers within a minute.
+
+**Where.** `datalogger/tests/test_rtde_fallback_monitor.c`, run through
+`datalogger/tests/build_and_run_tests.bat`. Two independent sources, both seen:
+
+1. The `csv_open()` naming tests take their stamp from `time(NULL)` with no injectable
+   clock, so three back-to-back calls straddle a second boundary now and then and the
+   expected suffix progression does not happen. Recorded inside the F15 entry above by the
+   session that fixed F15, as a limitation rather than as its own finding.
+2. The loopback integration test. On one run of 2026-08-20 the harness ended in
+   `TESTS FAILED` with `[RTDE] stream lost (10054)` and a recipe reply of
+   `DOUBLE,VECTOR6D,VECTOR6D,NOT_FOUND`, which is the fake server's reply arriving
+   truncated or out of order, not a defect in the decoder under test. The immediately
+   following run reported `505 checks, 0 failure(s)`.
+
+**Consequence.** The harness is the only acceptance gate the C tool has, and a gate that
+answers differently on identical input cannot refuse anything. The practical damage is in
+both directions: a real regression reads as "the known flake, re-run it", and a green run
+proves less than its 505 checks suggest. It is also what the register's own severity scale
+calls Medium - a non-deterministic gate - and it is now load-bearing, since F14, F15 and
+Task 9 of the emulator plan were all accepted on this harness.
+
+**Why it is logged and not fixed here.** The emulator plan's Regime B fixes a bug found
+while making a correction, in the same session. This one is not a bug in a correction: it
+is a defect of the test harness that judges them, and repairing it means giving
+`csv_open()` an injectable clock and making the fake RTDE server's handshake deterministic,
+which is a change to how every existing C test is written. That is its own scoped session,
+not a passenger on this one.
+
+**Proposed correction.** Two independent halves, in this order. Give `csv_open()` a clock
+seam - a function pointer or a stamp parameter defaulting to `time(NULL)` - so the naming
+tests pin an exact stamp instead of racing the wall clock; that alone removes source 1 and
+is small. Then make the loopback server hand its recipe reply in one deterministic write
+with the client reading to completion before asserting, so a partial read cannot present
+itself as `NOT_FOUND`. Until both land, treat a failing harness run as a failure to
+investigate, never as noise to re-run away.
+
+**Potential tests.** The fix is testable by repetition rather than by a new assertion: run
+the harness 20 times in a row and require 20 identical results. Worth adding to
+`build_and_run_tests.bat` as an opt-in loop flag, so the determinism claim is checkable by
+anyone who doubts it.
+
+---
+
 Same split as [`plan_acq_datalogger.md`](plan_acq_datalogger.md) §0-bis: the corrections
 themselves are small and mechanical enough for a Sonnet subagent, **except F1**, where the
 question of what a refused settings file should do to a running UI is a design decision, and
