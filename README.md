@@ -31,7 +31,10 @@ Two cooperating Python tools plus the generated on-robot artifacts:
 - **`ur5_sim/`** - offline validator and replay. Parses `etalement.script`, runs
   sequential IK against a UR5 model, reports failures, and (with `--visualize`) renders
   the robot in Swift (WebGL) alongside matplotlib panels (XYZ vs time, XY trail, IK
-  branch selector, test-surface overlay).
+  branch selector, test-surface overlay). It can also present itself on loopback as a
+  UR5 CB3 RTDE server, so [datalogger/](datalogger/)'s fallback monitor can be exercised
+  end to end with no robot present (`--emulate`, headless; `--visualize`, driven by the
+  viewer's START / PAUSE / STOP). See [ARCHITECTURE.md](ARCHITECTURE.md), section 8.
 
 ## Export options
 
@@ -64,7 +67,8 @@ robot's RTDE stream and writes its own CSV with automatic per-run file boundarie
 by the `runtime_state` field carried in that same stream (no Python, no PowerShell, no
 install of any kind on that machine). It is read-only toward the robot. Neither the main
 path nor this fallback depends on the other; build and deployment procedure in
-[datalogger/README.md](datalogger/README.md).
+[datalogger/README.md](datalogger/README.md), which also covers testing it locally
+against `ur5_sim`'s RTDE emulator, with no lab network and no robot.
 
 ## Dependencies
 
@@ -100,7 +104,11 @@ Quickest path on Windows, an interactive menu that activates `.venv` automatical
 ```
 
 Menu options: kinematic check (target or identity anchor), 3D visualizer (Swift +
-matplotlib), design UI alone, or design UI and viewer started together.
+matplotlib), design UI alone, design UI and viewer started together, or (options 7-8)
+the RTDE emulator alone with the fallback monitor, and a check of its recorded CSV.
+Options 3-4 and 7 also start `datalogger/rtde_fallback_monitor.exe` in its own window
+when the `.exe` has been built, so a trial run can be cross-checked against the same
+loopback stream with no extra step.
 
 Equivalent manual commands:
 
@@ -108,8 +116,13 @@ Equivalent manual commands:
 # Offline check (parse + IK, no GUI)
 python -m ur5_sim --check
 
-# Full visualizer (Swift 3D + matplotlib panels)
+# Full visualizer (Swift 3D + matplotlib panels; RTDE emulator served by default)
 python -m ur5_sim --visualize
+python -m ur5_sim --visualize --no-rtde-serve   # without the emulator socket
+
+# RTDE emulator alone, headless, no GUI and no robot (see ARCHITECTURE.md section 8)
+python -m ur5_sim --emulate --runs 2 --pause-at 30
+python -m ur5_sim --verify-csv auto             # check the newest recorded CSV
 
 # Design UI (also re-exports etalement.script and .urp)
 python ur5_etalementv6.py
@@ -183,6 +196,11 @@ Stdlib `unittest`, no pytest:
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
+
+Among that suite, `test_force_model.py`, `test_rtde_server.py`, `test_rtde_headless.py`,
+`test_emulate_cli.py`, `test_viewer_rtde_wiring.py` and `test_verify_csv.py` cover the
+RTDE emulator - loopback only, GUI-free, no robot needed. Full detail in
+[ARCHITECTURE.md](ARCHITECTURE.md), section 10.
 
 One exception, in C: the RTDE fallback monitor in [datalogger/](datalogger/) is a C tool,
 because the lab computer it runs on has no Python and nothing can be installed there. Its

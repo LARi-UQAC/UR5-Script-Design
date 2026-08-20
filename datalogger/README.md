@@ -89,7 +89,7 @@ all core Windows libraries present on every Windows 10 install.
 datalogger\tests\build_and_run_tests.bat
 ```
 
-Builds and runs the harness (147 checks; non-zero exit on any failure). No robot, no
+Builds and runs the harness (283 checks; non-zero exit on any failure). No robot, no
 network, no framework. It covers big-endian decoding against known byte sequences, every
 ordered `runtime_state` transition pair, the decimation cadence, the CSV format, and an
 integration layer that replays the RTDE handshake from a fake server on `127.0.0.1`:
@@ -98,6 +98,41 @@ connection leaving the partial file intact, a `NOT_FOUND` recipe field aborting 
 data is logged, and the protocol-version-1 fallback.
 
 Run it before any on-robot step.
+
+---
+
+## Testing locally against `ur5_sim`
+
+Before wiring the VLAN and the real robot, the whole socket path can be exercised on one
+development machine, loopback only, with no robot present: `ur5_sim` (design in
+[`plan_rtde_emulator.md`](../docs/superpower/plans/plan_rtde_emulator.md)) can present
+itself as a UR5 CB3 RTDE server on `127.0.0.1:30004`, the same handshake, recipe and byte
+layout this monitor expects from the real controller. See
+[ARCHITECTURE.md](../ARCHITECTURE.md), section 8, for the full wire contract.
+
+Two terminals, no VLAN, no static IP (both from the repo root):
+
+```
+# Terminal 1 - the monitor, pointed at loopback instead of the robot; sim_runs is
+# where --verify-csv auto looks first
+datalogger\rtde_fallback_monitor.exe 127.0.0.1 30004 datalogger\sim_runs
+
+# Terminal 2 - the emulator, headless, two consecutive runs
+python -m ur5_sim --emulate --runs 2
+```
+
+`ur5_sim --visualize` also serves the emulator by default, driven from the viewer's
+START / PAUSE / STOP instead of `--runs`; pass `--no-rtde-serve` to turn it off.
+`.\validate.bat` wraps both terminals into one step: options 3, 4 and 7 start the monitor
+automatically (skipped with a warning if `rtde_fallback_monitor.exe` has not been built
+yet), and option 8 runs `python -m ur5_sim --verify-csv auto` against whatever the monitor
+just recorded, in `datalogger\sim_runs\`.
+
+A CSV recorded from the emulator is not a lab trial, and its header says so: any peer
+connecting from a loopback address gets a `# WARNING: SIMULATED SOURCE - ur5_sim RTDE
+emulator, not robot data` line, right after `Robot RTDE Endpoint`, so a loopback recording
+can never be mistaken for one filed from the real UR5 at `192.168.4.38`. `--verify-csv`
+reads the same header and echoes the note back in its own report.
 
 ---
 

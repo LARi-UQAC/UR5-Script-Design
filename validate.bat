@@ -35,6 +35,10 @@ echo  ----- Outils combines -----
 echo   5. Demarrer les deux  (UI conception + viewer 3D simultanes)
 echo   6. UI conception seule (ur5_etalementv6.py)
 echo.
+echo  ----- Emulateur RTDE (sans robot) -----
+echo   7. Emulateur seul     (headless, 2 essais + moniteur)
+echo   8. Verifier le CSV    (dernier ACQ_rtde_*.csv)
+echo.
 echo   0. Quitter
 echo.
 set /p choice="Choix : "
@@ -48,10 +52,12 @@ if "%choice%"=="2" (
     goto pause_back
 )
 if "%choice%"=="3" (
+    call :start_monitor
     python -m ur5_sim --visualize
     goto pause_back
 )
 if "%choice%"=="4" (
+    call :start_monitor
     python -m ur5_sim --visualize --identity
     goto pause_back
 )
@@ -73,8 +79,27 @@ if "%choice%"=="6" (
     python ur5_etalementv6.py
     goto pause_back
 )
+if "%choice%"=="7" (
+    call :start_monitor
+    python -m ur5_sim --emulate --runs 2 --pause-at 30
+    goto pause_back
+)
+if "%choice%"=="8" (
+    python -m ur5_sim --verify-csv auto
+    goto pause_back
+)
 if "%choice%"=="0" goto end
 goto menu
+
+:start_monitor
+if not exist "%~dp0datalogger\rtde_fallback_monitor.exe" (
+    echo [WARN] datalogger\rtde_fallback_monitor.exe absent : lancez datalogger\build.bat
+    echo        La visualisation continue sans le moniteur RTDE.
+    goto :eof
+)
+if not exist "%~dp0datalogger\sim_runs" mkdir "%~dp0datalogger\sim_runs"
+start "UR5 - Moniteur RTDE" "%~dp0datalogger\rtde_fallback_monitor.exe" 127.0.0.1 30004 "%~dp0datalogger\sim_runs"
+goto :eof
 
 :pause_back
 echo.

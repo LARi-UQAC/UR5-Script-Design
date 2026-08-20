@@ -89,10 +89,14 @@ flowchart LR
 |---|---|
 | `parsing/urscript.py` | Lenient regex reader. `parse_poses()` returns 4-tuples `(lineno, pose, cycle_idx, in_contact)`; handles three emit formats (`movel(T(p[...]))` legacy, `movel(apply_correction(p[...], dx, dy))` current, plain `movel(p[...])`). `force_mode` / `end_force_mode` toggle `in_contact` inside each `def cycle_N():`. Also parses probe blocks, `NHAT`, the nominal frame, and `global <NAME> = <speed>` preamble declarations. |
 | `kinematics/` | `transforms.rotate_translation_y` is the only implementation of the `SIM_TRAJ_ROT_Y_RAD` remap (currently 0.0 since `P_REF` has identity orientation). `ik.run_ik` (sequential IK on link `tool0`), `ik_multisolve` (branch enumeration), `motion.densify_segments`. |
-| `visualization/` | Split by concern so no file passes the 4096-token ceiling (F6). `viewer.py` is the assembly point: it normalises the per-frame lists, builds the scene and the figure, wires the widgets, and hands control to `plt.show()`. `swift_scene.py` (3D scene: launch, meshes, WebSocket keepalive, per-frame pose push, tab reopen, teardown), `mpl_display.py` (figure, panels, plate and probe overlays, widgets, per-frame artist repaint), `playback.py` (trajectory buffer, wall clock, HUD, the matplotlib timer callback), `controls.py` (START / STOP / configuration callbacks), `playback_clock.py` (`PlaybackClock`, the START/PAUSE/STOP timing rule, unit-tested), `recompute.py` (off-GUI-thread re-parse and IK), `ipc_live.py` (UDP loopback status feed; `send_tcp_live` stays importable from `swift_scene`), `surface.py` (plate geometry + force surrogate, reads calibration and force fields through `get_settings()` at call time rather than at import), `interactions.py` (mouse pan/zoom on the XY panel). |
+| `visualization/` | Split by concern so no file passes the 4096-token ceiling (F6). `viewer.py` is the assembly point: it normalises the per-frame lists, builds the scene and the figure, wires the widgets, and hands control to `plt.show()`. `swift_scene.py` (3D scene: launch, meshes, WebSocket keepalive, per-frame pose push, tab reopen, teardown), `mpl_display.py` (figure, panels, plate and probe overlays, widgets, per-frame artist repaint), `playback.py` (trajectory buffer, wall clock, HUD, the matplotlib timer callback), `controls.py` (START / STOP / configuration callbacks), `playback_clock.py` (`PlaybackClock`, the START/PAUSE/STOP timing rule, unit-tested), `recompute.py` (off-GUI-thread re-parse and IK), `ipc_live.py` (UDP loopback status feed; `send_tcp_live` stays importable from `swift_scene`), `rtde_link.py` (the RTDE emulator's `load()` / `publish()` hooks, called once per frame and no-ops when no server is served; maps START/PAUSE/RESUME/STOP onto the monitor's PLAYING/PAUSING/PAUSED/STOPPED file boundaries, section 8), `surface.py` (plate geometry + force surrogate, reads calibration and force fields through `get_settings()` at call time rather than at import), `interactions.py` (mouse pan/zoom on the XY panel). |
 | `meshes/` | FT-300 + 2F-85 + `Support doigt.stl` pipeline for Swift: decimation, color extraction, link loader. |
 | `reporting/text_report.py` | Prints surface events first (`SURFACE_DEVIATION` / `SURFACE_CLAMP`), then IK / joint-limit failures. |
 | `cli.py` | Argparse entry (`--check`, `--visualize`, `--identity`); prints `config.settings_summary()` at the head of every report (source, read timestamp, overrides) before anchoring `P_ANCHOR_OLD` / `P_REF`, applying the surface constraint pre-IK, filtering expected recontact deviations (section 5), and checking TCP speed globals against `URSCRIPT_MAX_TCP_SPEED_MPS`. |
+| `emulate.py` | CLI side of the RTDE emulator (section 8): the `--rtde-serve` / `--no-rtde-serve` / `--rtde-port` / `--emulate` / `--runs` / `--pause-at` flags, `wants_rtde()` (on by default with `--visualize`, refused with a printed reason on `--check`), `build_rtde_server()` (wires `ForceModel` into `RtdeServer`), and the SE3 -> `(x, y, z, rx, ry, rz)` / penetration buffer conversions the server is fed. |
+| `rtde_server.py` | `RtdeServer`: one loopback client, the CB3 handshake, and a 125 Hz emitter thread (section 8). Output packages only, so nothing that connects can command it. Re-exports `rtde_wire.py` (framing, recipe, `RunStateMachine`, trajectory interpolation) and `rtde_headless.run_headless`, split out only to hold the file-size ceiling. |
+| `force_model.py` | `ForceModel`, the FT-300 surrogate driving `actual_TCP_force`: contact regulation, Coulomb friction, sensor noise, from the contact flag, penetration depth and TCP velocity. Parameters are **plausible, not measured** (`config.py` `FORCE_MODEL_*`). |
+| `verify_csv.py` | `--verify-csv` glue: geometric distance from each recorded point to the commanded, surface-clamped polyline (survives a pause, unlike a time-indexed check), the newest-`ACQ_rtde_*.csv` lookup, and the report printer (section 8). |
 | `config.py` | Paths, anchors, sim DT/speed, surface constants, mesh decimation targets. Reads `etalement_settings.json` through `design.settings.get_settings()` once at import - the same file the UI writes - and falls back to `design/params.py` defaults when it is absent; `settings_summary()` reports the source and the read time, since a run in progress while the operator saves new settings still validates against the old ones. Shared constants otherwise imported from `design.params`, not duplicated. |
 | `ipc_config.py` | UDP host/port/payload constants shared by writer (viewer) and reader (design UI). |
 | `probe.py` | 3-point probe simulation. **Parked** (see section 6). |
@@ -102,11 +106,11 @@ flowchart LR
 Two tools record the same seven columns during a trial. Both are required and neither
 replaces the other; they share no code, no process and no file, so a fault in one cannot
 corrupt the other's output. This folder is the one place in the repository where the
-language is not Python by default: see the invariant in section 8.
+language is not Python by default: see the invariant in section 9.
 
 | File | Responsibility |
 |---|---|
-| `datalogger/rtde_fallback_monitor.c` | Fallback path. Standalone C executable running on a lab computer, reading the robot's RTDE stream over the network (port 30004) and writing one `ACQ_rtde_*.csv` per program run. Read-only toward the robot: it opens one outbound connection and never uses the RTDE input path, so it is safe to leave connected during a trial. Its test harness (`tests/`, 147 checks, run through `tests/build_and_run_tests.bat`) includes a fake RTDE server on loopback, so the whole socket path runs with no robot. |
+| `datalogger/rtde_fallback_monitor.c` | Fallback path. Standalone C executable running on a lab computer, reading the robot's RTDE stream over the network (port 30004) and writing one `ACQ_rtde_*.csv` per program run. Read-only toward the robot: it opens one outbound connection and never uses the RTDE input path, so it is safe to leave connected during a trial. Its test harness (`tests/`, 283 checks, run through `tests/build_and_run_tests.bat`) includes a fake RTDE server on loopback, so the whole socket path runs with no robot. |
 | `onrobot/acq_logger_daemon.py` | Main path, on the controller. Loopback TCP server on port 50100 that the `data_logger` thread of `etalement_acq.script` streams samples into, plus an `FTReader` thread merging the Robotiq FT-300 stream from the fixed port 63351. Buffers in RAM for the whole trial (zero USB I/O while the robot moves), then writes `ACQ_log_YYYYMMDD_HHMMSS.csv` to the detected USB mount on `STOP`, fsyncs it, and replies `OK <file> <n>` or `ERR <reason>`. |
 | `onrobot/urmagic_acqlogger.sh` | UR "magic file": run as root by the controller when the USB key is inserted, it launches the daemon from that same key and returns immediately. |
 | `onrobot/acq_emulator.py` | Development machine only. Fake FT-300 server plus a fake robot client replaying the real poses of `etalement.script` into the daemon at 50 Hz, so the whole acquisition path runs offline. The acquisition-side mirror of the C fake RTDE server. |
@@ -201,7 +205,57 @@ frame matters).
   `trail_anchor_m`. Emitted but not yet consumed: `in_contact`, `force_z_n`,
   `surface_depth_mm` - a ready-made hook for a live force/contact HUD in the design UI.
 
-## 8. Invariants (do not relax)
+## 8. RTDE emulation contract (simulator to monitor)
+
+`ur5_sim` can present itself on loopback as a UR5 CB3 RTDE server, so
+`datalogger/rtde_fallback_monitor.exe` can be exercised end to end with no robot present.
+This is a **separate channel** from section 7's UDP overlay to the design UI - different
+protocol (RTDE over TCP vs UDP JSON), different peer (the C monitor vs `design/live_ipc.py`),
+different port, no state shared between them - and section 7 is unchanged by its addition.
+
+- **Bind**: `RTDE_EMU_HOST = 127.0.0.1` only (`ur5_sim/config.py`), default port
+  `RTDE_EMU_PORT = 30004` (the real controller's port, overridable with `--rtde-port`).
+  Binding `0.0.0.0` would make the emulator reachable from the lab VLAN and
+  indistinguishable from the robot at `192.168.4.38`; `ur5_sim/emulate.py` offers no host
+  flag, so nothing on the command line can widen the bind.
+- **Handshake package types** (one byte after a 2-byte big-endian size,
+  `RTDE_HEADER_SIZE = 3`): `RTDE_REQUEST_PROTOCOL_VERSION` (86, `'V'`), `RTDE_TEXT_MESSAGE`
+  (77, `'M'`), `RTDE_CONTROL_PACKAGE_SETUP_OUTPUTS` (79, `'O'`), `RTDE_DATA_PACKAGE`
+  (85, `'U'`), `RTDE_CONTROL_PACKAGE_START` (83, `'S'`).
+- **Recipe**: `timestamp,actual_TCP_pose,actual_TCP_force,runtime_state`, typed
+  `DOUBLE,VECTOR6D,VECTOR6D,UINT32`.
+- **Byte layout** of one data payload (`RTDE_PAYLOAD_SIZE = 108`): `timestamp` at offset 0,
+  `actual_TCP_pose` at 8, `actual_TCP_force` at 56, `runtime_state` at 104. There is no
+  shared header between the two languages, so `ur5_sim/rtde_wire.py` and
+  `datalogger/rtde_fallback_monitor.c` each hard-code these same numbers; they are kept
+  honest only by the offset assertions in `tests/test_rtde_server.py` (rule in section 11).
+- **`runtime_state` mapping**, the field the monitor keys its file boundaries on
+  (`ur5_sim/rtde_wire.RunStateMachine`): `STOPPING` (0), `STOPPED` (1), `PLAYING` (2),
+  `PAUSING` (3), `PAUSED` (4), `RESUMING` (5). A transition to `STOPPED` closes the
+  monitor's current CSV and the next `PLAYING` opens a new one; `PAUSING` / `PAUSED` /
+  `RESUMING` keep the same file growing - the wire-level mirror of the viewer's real PAUSE
+  (`ur5_sim/visualization/playback_clock.PlaybackClock`), published by
+  `ur5_sim/visualization/rtde_link.py`.
+- **Force surrogate**: `ur5_sim/force_model.ForceModel` feeds `actual_TCP_force` from the
+  same contact flag and penetration depth as section 5's kinematic surrogate, plus TCP
+  velocity. Every parameter (`FORCE_MODEL_STIFFNESS_N_PER_M`, `FORCE_MODEL_TAU_S`,
+  `FORCE_MODEL_FRICTION_MU`, `FORCE_MODEL_NOISE_N`, `FORCE_MODEL_SEED` in `config.py`) is
+  **plausible, not measured** - output resembles FT-300 data, it is not FT-300 data.
+- **Driving it**: `--visualize` serves the emulator by default from the viewer's
+  START / PAUSE / STOP; `--no-rtde-serve` turns it off; `--emulate --runs N --pause-at S`
+  drives the same state machine headlessly, in real time, with no GUI
+  (`ur5_sim/rtde_headless.run_headless`). `--check` never serves: that path has no
+  real-time pacing, so a multi-minute protocol would stream in seconds and record nothing
+  worth calling a trial; the flag is refused with a printed reason instead of opening a
+  socket silently.
+- **Verifying a recording**: `--verify-csv [auto|PATH]` (`ur5_sim/verify_csv.py`) checks
+  the geometric distance from every recorded point to the commanded, surface-clamped
+  polyline rather than a time index, so a paused run is not read as a failure; the
+  tolerance is `1e-5` m. A loopback peer gets a `# WARNING: SIMULATED SOURCE` line in the
+  monitor's CSV header (`datalogger/rtde_fallback_monitor.c`, `is_loopback_ipv4`), and
+  `--verify-csv` echoes that line back in its own report.
+
+## 9. Invariants (do not relax)
 
 ### Settings layer
 
@@ -235,8 +289,8 @@ bytes the Linux controller produces.
 
 The dependency runs one way only. `onrobot/acq_emulator.py` is a development tool and may
 import `ur5_sim`; the daemon may never be imported by, or import, anything in this
-repository. A future `ur5_sim/force_model.py` (see `plan_rtde_emulator.md`) is allowed to
-replace the emulator's placeholder force source, not the daemon's behaviour.
+repository. `ur5_sim/force_model.py` (section 8) is the RTDE emulator's force source; it
+feeds the emulator's own served stream, never the daemon's behaviour.
 
 ### Dependencies
 
@@ -249,7 +303,7 @@ replace the emulator's placeholder force source, not the daemon's behaviour.
   UR5 meshes 404 in the browser.
 - Tests are stdlib `unittest` only; pytest is not installed in `.venv`.
 
-## 9. Tests and validation workflow
+## 10. Tests and validation workflow
 
 ```bash
 python -m ur5_sim --check                 # parse + IK, no GUI
@@ -257,6 +311,10 @@ python -m ur5_sim --visualize             # Swift 3D + matplotlib
 python -m ur5_sim --check --identity      # refactor self-check (identity transform)
 python ur5_etalementv6.py --export        # regenerate etalement.script
 python -m unittest discover -s tests -p "test_*.py"
+
+# RTDE emulator (section 8), against datalogger/rtde_fallback_monitor.exe
+python -m ur5_sim --emulate --runs 2 --pause-at 30   # headless, no GUI, no robot
+python -m ur5_sim --verify-csv auto                  # newest datalogger/sim_runs/ACQ_rtde_*.csv
 ```
 
 | Test module | Covers |
@@ -271,6 +329,12 @@ python -m unittest discover -s tests -p "test_*.py"
 | `test_udp_ipc.py` | UDP frame round-trip (section 7) |
 | `test_playback_clock.py` | `PlaybackClock`: PAUSE banks elapsed sim time, STOP discards it |
 | `test_viewer_pause.py` | the PAUSE control through the real viewer callbacks, headless (Agg + faked `perf_counter`, `env=None`) |
+| `test_force_model.py` | `ForceModel`'s stated behaviour (contact regulation, friction, noise), not the realism of its parameters (section 8) |
+| `test_rtde_server.py` | the RTDE wire constants pinned against `datalogger/rtde_fallback_monitor.c` (recipe, byte offsets, package types), the served socket and the CB3 handshake (section 8) |
+| `test_rtde_headless.py` | `run_headless`: two runs give two STOPPED -> PLAYING edges; a `--pause-at` gives PAUSED with no STOPPED in between |
+| `test_emulate_cli.py` | when the emulator opens at all (`--check` never, `--visualize` by default, `--no-rtde-serve` off), that no flag can widen the loopback bind, and the force-surrogate sign convention |
+| `test_viewer_rtde_wiring.py` | the viewer publishing START / PAUSE / RESUME / STOP to a recording `RtdeServer` stub, headless (Agg, no socket) |
+| `test_verify_csv.py` | the geometric distance-to-polyline check, which survives a pause where a time-indexed comparison would not |
 | `test_probe_sim.py` | parked with the 3-point probe (section 6) |
 | `test_settings.py` | `Settings.to_overrides` / `from_file` / `save` round-trip, each dataclass default equal to its `design/params.py` constant, and out-of-bounds values rejected with the TCP-speed clamps applied and reported |
 | `test_export_settings.py` | `_build_urscript_lines()` at default settings matches `tests/fixtures/golden_headless.script` byte for byte, the recipe block included since it is now deterministic; a changed `Settings` field actually changes the generated script; the recipe block is emitted even at pure defaults and carries no date |
@@ -291,7 +355,7 @@ alongside the `CIRC_R_CIRCLE` and `CIRC_N_CIRCLES` default alignment.
 No CI: run the suite locally before any change touching parsing, transforms, export, or
 the surface module.
 
-## 10. Rules for the next improvement
+## 11. Rules for the next improvement
 
 1. New constants go in `design/params.py`; `ur5_sim/config.py` imports, never redefines.
    A constant exposed to the operator also gets a `FieldSpec` in
@@ -302,7 +366,13 @@ the surface module.
    faithful pre-flight of the real run.
 4. Prefer extending the UDP frame (section 7) over reintroducing file IPC.
 5. Never `from design.params import X` in a module that must see operator overrides
-   (section 8).
+   (section 9).
+6. The RTDE wire layout (section 8) is duplicated in C and Python by necessity - no
+   shared header links them. Any change to the recipe, the byte offsets, or the package
+   type values must be made in both `ur5_sim/rtde_wire.py` and
+   `datalogger/rtde_fallback_monitor.c` together, and stays pinned by the offset
+   assertions in `tests/test_rtde_server.py`; a drift there fails a test instead of
+   filling a lab CSV with plausible wrong numbers.
 
 What remains open, in no particular priority order:
 
