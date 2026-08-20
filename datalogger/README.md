@@ -99,6 +99,14 @@ data is logged, and the protocol-version-1 fallback.
 
 Run it before any on-robot step.
 
+```
+datalogger\tests\build_and_run_tests.bat --repeat 20
+```
+
+Builds once, then runs the harness 20 times and requires every run to produce the same exit
+code and the same summary line as the first; this is how the fake server's handshake is
+checked to be deterministic (F16), rather than merely passing once.
+
 ---
 
 ## Testing locally against `ur5_sim`

@@ -594,6 +594,12 @@ static void test_local_address_of_falls_back_on_an_invalid_socket(void)
  * replays a scripted runtime_state sequence, so the whole socket path - the
  * handshake, the packet framing, the file boundaries, the decimation and the
  * disconnect handling - is exercised with no robot and no network.
+ *
+ * F16: every connection this server closes after it has sent at least one
+ * packet is closed gracefully (fake_close_gracefully(), below) so a Windows
+ * RST cannot discard a reply the client has not yet read. The sole
+ * exception is the deliberate mid-stream reset in the abort_mid_stream
+ * branch, which models a cable pull and is exempt on purpose.
  */
 
 typedef struct {
@@ -722,6 +728,31 @@ static void fake_record_peer_address(SOCKET c, char *out, size_t out_len)
             (unsigned)(host_addr & 0xFFu));
 }
 
+/*
+ * Close the connection in a way that guarantees delivery of everything
+ * already sent (F16).  closesocket() on Windows can emit an RST, which
+ * discards data the client has received but not yet read; a half-close
+ * followed by a drain to end-of-stream cannot: the client sees FIN only
+ * after it has consumed every byte before it.  Bounded by a receive
+ * timeout so a client that never closes cannot hang the harness.
+ */
+static void fake_close_gracefully(SOCKET c)
+{
+    DWORD timeout_ms = 2000;
+    char scratch[64];
+
+    setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout_ms,
+              sizeof(timeout_ms));
+    shutdown(c, SD_SEND);
+    for (;;) {
+        int r = recv(c, scratch, sizeof(scratch), 0);
+        if (r <= 0) {
+            break;
+        }
+    }
+    closesocket(c);
+}
+
 static DWORD WINAPI fake_server_thread(LPVOID arg)
 {
     fake_server_cfg_t *cfg = (fake_server_cfg_t *)arg;
@@ -760,7 +791,8 @@ static DWORD WINAPI fake_server_thread(LPVOID arg)
             /* The client is expected to come back asking for version 1. */
             if (fake_recv_packet(c, &type, payload, &n) != 0 ||
                 type != RTDE_REQUEST_PROTOCOL_VERSION) {
-                closesocket(c);
+                /* F16: the version reply above already went out. */
+                fake_close_gracefully(c);
                 return 1;
             }
             negotiated = (int)read_be_u16(payload);
@@ -772,7 +804,8 @@ static DWORD WINAPI fake_server_thread(LPVOID arg)
     /* 2. output recipe */
     if (fake_recv_packet(c, &type, payload, &n) != 0 ||
         type != RTDE_CONTROL_PACKAGE_SETUP_OUTPUTS) {
-        closesocket(c);
+        /* F16: the protocol-version reply above already went out. */
+        fake_close_gracefully(c);
         return 1;
     }
     {
@@ -790,8 +823,11 @@ static DWORD WINAPI fake_server_thread(LPVOID arg)
         maybe_text(c, cfg);
         fake_send_packet(c, RTDE_CONTROL_PACKAGE_SETUP_OUTPUTS, reply, off + len);
         if (cfg->emit_not_found) {
-            /* The client must abort here rather than log garbage. */
-            closesocket(c);
+            /* The client must abort here rather than log garbage.  F16:
+             * the SETUP_OUTPUTS reply just sent above is the one the
+             * client is about to read; a bare closesocket() here is the
+             * defect that produced the intermittent WSAECONNRESET. */
+            fake_close_gracefully(c);
             return 0;
         }
     }
@@ -799,7 +835,8 @@ static DWORD WINAPI fake_server_thread(LPVOID arg)
     /* 3. start */
     if (fake_recv_packet(c, &type, payload, &n) != 0 ||
         type != RTDE_CONTROL_PACKAGE_START) {
-        closesocket(c);
+        /* F16: the SETUP_OUTPUTS reply above already went out. */
+        fake_close_gracefully(c);
         return 1;
     }
     reply[0] = 1;
@@ -822,7 +859,12 @@ static DWORD WINAPI fake_server_thread(LPVOID arg)
         }
         if (cfg->abort_mid_stream && i == cfg->n_states / 2) {
             /* Controller reboot / cable pull: reset the connection so the
-             * client sees an error, not an orderly end of stream. */
+             * client sees an error, not an orderly end of stream.  F16:
+             * this is the one deliberate reset in this function - the RST
+             * IS the modelled fault, not an accident - so it stays a plain
+             * closesocket() with SO_LINGER {1,0} and is exempt from the
+             * graceful-close rule applied everywhere else in this
+             * function.  Do not "fix" this one. */
             struct linger lg;
             lg.l_onoff = 1;
             lg.l_linger = 0;
@@ -831,7 +873,9 @@ static DWORD WINAPI fake_server_thread(LPVOID arg)
             return 0;
         }
     }
-    closesocket(c);
+    /* F16: the START reply above (and any data packets streamed since)
+     * already went out. */
+    fake_close_gracefully(c);
     return 0;
 }
 
