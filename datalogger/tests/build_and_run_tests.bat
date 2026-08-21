@@ -51,19 +51,31 @@ REM its "N checks, N failure(s)" summary line, or the harness is not the
 REM deterministic tool F16 claims it to be.
 set "FIRST_SUMMARY="
 set "ALL_OK=1"
+del /q mismatch_run_*.out >nul 2>&1
 for /l %%I in (1,1,%REPEAT%) do (
     ".\test_rtde_fallback_monitor.exe" > "run_%%I.out.tmp" 2>&1
     set "RC=!errorlevel!"
     set "SUMMARY="
+    set "KEEP="
     for /f "delims=" %%L in ('findstr /c:" checks," "run_%%I.out.tmp"') do set "SUMMARY=%%L"
     if "!FIRST_SUMMARY!"=="" set "FIRST_SUMMARY=!SUMMARY!"
     if not "!RC!"=="0" (
         echo MISMATCH at run %%I: exit code !RC! ^(expected 0^)
         set "ALL_OK=0"
+        set "KEEP=1"
     )
     if not "!SUMMARY!"=="!FIRST_SUMMARY!" (
         echo MISMATCH at run %%I: "!SUMMARY!" differs from run 1's "!FIRST_SUMMARY!"
         set "ALL_OK=0"
+        set "KEEP=1"
+    )
+    REM A gate that detects a divergent run and then deletes its output
+    REM leaves nothing to diagnose, which is the whole reason that run
+    REM mattered. Keep the full stdout of any run that diverged, name it,
+    REM and delete the rest.
+    if "!KEEP!"=="1" (
+        move /y "run_%%I.out.tmp" "mismatch_run_%%I.out" >nul
+        echo   full output kept in mismatch_run_%%I.out
     )
 )
 del /q run_*.out.tmp >nul 2>&1

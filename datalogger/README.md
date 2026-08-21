@@ -105,7 +105,11 @@ datalogger\tests\build_and_run_tests.bat --repeat 20
 
 Builds once, then runs the harness 20 times and requires every run to produce the same exit
 code and the same summary line as the first; this is how the fake server's handshake is
-checked to be deterministic (F16), rather than merely passing once.
+checked to be deterministic (F16), rather than merely passing once. A run that diverges has
+its full stdout kept as `mismatch_run_<N>.out` next to the harness, named on the console:
+without it the gate would report that something differed and then delete the only record of
+what it was. Those files are gitignored and are deleted at the start of the next
+`--repeat` run.
 
 ---
 

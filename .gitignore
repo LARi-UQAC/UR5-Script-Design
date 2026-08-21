@@ -8,6 +8,7 @@ __pycache__/
 datalogger/*.exe
 datalogger/tests/*.exe
 datalogger/tests/_tmp_*/
+datalogger/tests/mismatch_run_*.out
 ACQ_rtde_*.csv
 datalogger/sim_runs/*.csv
 
