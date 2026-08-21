@@ -2,13 +2,20 @@
 
 ## What is left to do (read this first)
 
-Status at 2026-08-20, on `main`, written by the session that closed F16 and the C half of
-F6. **Sixteen entries now: F1 to F16 are fixed and verified; none is still open.** The text
-that stood here counted fifteen and said none was open. That stopped being true the moment
-F16 was appended below it, since F16 was logged after this section was last written, and it
-is a Medium rather than a hygiene item.
+Status at 2026-08-21, on `main`. **Eighteen entries. One is open: F17.** F1 to F16 and F18
+are fixed and verified. Read F17 before trusting F16's status block: it records that F16's
+"source 2" was never reproduced, that ~82000 iterations with the suspected defect restored
+produced nothing, and that the evidence quoted for it in F16 is not diagnostic, so half of
+F16's repair is hardening rather than a measured fix. F17 also carries the protocol a cold
+session should follow if the flake ever shows again.
 
-F16 closed in this session, in two commits, in the order its own entry sets out. First the
+Two earlier claims in this section were wrong and are corrected here rather than in the
+entries that made them. The version dated 2026-08-20 counted fifteen entries and said none
+was open, which F16 already contradicted from below. The version written later the same day
+counted sixteen and again said none was open, which was true only as long as nobody checked
+F16's source 2; F17 is the result of checking.
+
+F16 closed on 2026-08-20, in two commits, in the order its own entry sets out. First the
 clock seam: `csv_open()` takes a `stamp_time` argument and `monitor_run_once()`, its one
 production caller, passes `time(NULL)` there, so the naming tests pin an exact stamp instead
 of racing the second boundary. Then the fake RTDE server: every close that follows a sent
@@ -26,7 +33,7 @@ silently truncated. See the F15 entry below for the full account and how it was 
 F6 and F7 closed on 2026-08-20, together, in `plan_rtde_emulator.md` task 6, and in that
 order: `viewer.py` was split into seven modules first, in a commit that changed no
 behaviour, and PAUSE was added to the split file second. Read both entries before touching
-the viewer. The Python half of F6 is done. The C half was decided in this session, in a
+the viewer. The Python half of F6 is done. The C half was decided on 2026-08-20, in a
 commit that changed no behaviour and landed before the F16 fixes, for the same reason the
 viewer split landed before PAUSE: a split and a correction in one diff can be judged on
 neither. The decision went against
@@ -39,14 +46,15 @@ the committed `etalement.script` was reproduced byte for byte, its recipe is now
 every export, and the two `design/params.py` defaults that did not match the trial were
 aligned on it. Read the F10 entry before touching export or the golden fixture.
 
-Every entry in this register, F1 to F16, is corrected and has tests. F1 to F14 were last
+Every entry in this register except F17 is corrected and has tests. F1 to F14 were last
 verified together: 198 Python tests, 275 C checks (before F15), `python -m ur5_sim --check`
 clean, `pip-audit` clean. The claim that stood here, that the Python suite had not been
 re-run since, is stale: it was re-run after F15's session and stands at 285 tests green.
-F15's session and this one both touched C only, so neither re-ran `ur5_sim --check` or
-`pip-audit`; both rebuilt the tool clean under `-Wall -Wextra` and ran the C harness, which
-now stands at 507 checks, 0 failures (505 before F16's new naming test), and at 40
-consecutive runs with an identical result.
+The sessions of 2026-08-20 and 2026-08-21 touched C only, so neither re-ran
+`ur5_sim --check` or `pip-audit`; both rebuilt the tool clean under `-Wall -Wextra` and
+ran the C harness, which
+now stands at 507 checks, 0 failures (505 before F16's new naming test), and at 160
+consecutive runs with an identical result (campaigns of 20, 40 and 100).
 
 **How the model column was decided**, so it can be applied to entries added later rather
 than argued each time. Opus takes the work where the hard part is the decision: what an
@@ -900,6 +908,110 @@ that alters the exit code on run 3: both are caught, named by run number, and ex
 failure(s))`. A second campaign at `--repeat 40` gave `40/40 identical` at the same 507
 checks. No Python was touched, so the Python suite, `ur5_sim --check` and `pip-audit` were
 not re-run.
+
+## F17. F16's "source 2" was never reproduced, so its fix is unmeasured (Medium) - OPEN
+
+**Audit basis.** Measured 2026-08-21, on `main`, at the request of the professor, after F16
+was recorded as fixed. This entry exists because the F16 status block claims a repair whose
+effect cannot be shown, and a cold session must not read that claim as settled.
+
+**Where.** `datalogger/tests/test_rtde_fallback_monitor.c`, the `emit_not_found` branch of
+`fake_server_thread()` and the assertion it feeds,
+`test_unsupported_field_aborts_before_logging` (`run_against_fake(&cfg, dir) ==
+MON_ERR_HANDSHAKE`). F16 named two sources of non-determinism; source 1 (the `csv_open()`
+clock) was reproduced at 3 failures in 20 runs and is fixed and verified. This entry is
+about source 2 only.
+
+**What was measured.** Four campaigns, on this workstation, MinGW-w64 gcc 10.3.0, all after
+F16's two commits.
+
+1. Full harness, current code, 100 consecutive runs: 100/100 identical, `507 checks, 0
+   failure(s)`. With the earlier 20 and 40 campaigns, 160 identical runs.
+2. Full harness with **F16's half-2 fix reverted** (the five `fake_close_gracefully(c)` call
+   sites put back to a bare `closesocket(c)`, the clock seam left in place), 100 consecutive
+   runs: 100/100 identical. The suspected defect, restored, produced nothing.
+3. A focused driver looping only `test_unsupported_field_aborts_before_logging()`, 2000
+   iterations, reverted variant: no reproduction, and `[RTDE] stream lost` appeared zero
+   times.
+4. The same driver, 8 then 4 concurrent instances, 10000 iterations each, reverted variant:
+   the assertion **does** fail, at any iteration from 1 upward. But the failing path is not
+   source 2. The only `[RTDE]` message present is `cannot reach 127.0.0.1:<port>`, which is
+   the `connect()` failure branch of `rtde_connect()` returning `MON_ERR_CONNECT` - ephemeral
+   ports and `TIME_WAIT` exhausted by tens of thousands of loopback connects in seconds, an
+   artifact of the stress driver. The same concurrent campaign against the **fixed** variant
+   fails identically and for the same reason, which is the proof that this reproduction is
+   fix-independent and therefore not source 2.
+
+**Consequence, stated plainly.** Source 2 has never been observed under controlled
+conditions. Roughly 82000 iterations of the exact scenario, with the suspected defect
+restored, produced not one instance of the mechanism F16 blames.
+
+**And the original evidence does not settle it either.** F16 quotes, from the failing run of
+2026-08-20, `[RTDE] stream lost (10054)` and a recipe of `DOUBLE,VECTOR6D,VECTOR6D,NOT_FOUND`.
+Neither line is diagnostic: `stream lost (10054)` is the expected stdout of
+`test_midstream_disconnect_preserves_the_partial_file`, whose fake server resets the
+connection on purpose, and the `NOT_FOUND` block is the expected stdout of
+`test_unsupported_field_aborts_before_logging` when it passes. Both appear in every green
+run. The failing `FAIL [...] line N:` line, the one piece that would name the failing
+assertion, was not recorded. So the 2026-08-20 failure is equally well explained by source
+1, whose measured rate was 15 percent, and there may be no second source at all.
+
+**Status of the half-2 change.** It stays. `closesocket()` emitting an RST that discards
+unread received data is real Windows behaviour, the graceful close costs nothing, and a
+sound half-close is the right thing for a test server to do. But it is **hardening, not a
+verified fix**, and the F16 status block should be read with this entry beside it.
+
+**What a cold session should do.** Do not re-derive the above; it is measured. Do this:
+
+1. Reproduce first or do nothing. `datalogger	estsuild_and_run_tests.bat --repeat 100`
+   is the cheap gate (about 1.5 s per run). A divergent run now leaves its full stdout in
+   `datalogger/tests/mismatch_run_<N>.out` (F18); that file is the evidence, not the console
+   tail.
+2. Classify the failure before theorising, using the `mismatch_run_<N>.out`: read the
+   `FAIL [group] line N:` line to know **which** assertion failed, then the `[RTDE]` lines
+   immediately above it to know **which path** produced it. `cannot reach` is
+   `MON_ERR_CONNECT` (a connect failure, usually resource exhaustion on this machine and
+   almost certainly an artifact); `stream lost` inside the NOT_FOUND group is
+   `MON_ERR_STREAM` and would be source 2 confirmed; a `CHECK_STR` on a `_1`/`_2` suffix
+   would be source 1 back from the dead.
+3. If it is source 2, revert `fake_close_gracefully()` at the `emit_not_found` site only and
+   show the rate rise. That is the missing before-and-after this entry could not produce.
+4. Do not chase it with concurrency. Concurrency reproduces `MON_ERR_CONNECT` on demand and
+   proves nothing about the handshake.
+
+**Conditions the professor may supply.** He runs his own trials; if a failure appears there,
+the conditions he reports (machine load, what else was running, whether the run was inside
+`validate.bat`, and the kept `mismatch_run_<N>.out`) become the reproduction recipe this
+entry is missing, and the work restarts from step 2 above.
+
+**Potential tests.** None to add until it reproduces. A test that cannot be made to fail
+before the fix is not a test of the fix; it would only re-pin the assertion that already
+exists. The gate that matters is already in place: `--repeat N` plus the kept output file.
+
+---
+
+## F18. The repetition gate destroyed the evidence it had just found (Low) - FIXED
+
+**Where.** `datalogger/tests/build_and_run_tests.bat`, the `--repeat` loop added by F16 on
+2026-08-20.
+
+**Consequence.** The loop wrote each run's stdout to `run_<N>.out.tmp`, compared exit codes
+and summary lines, printed `MISMATCH at run N` when they differed, and then deleted every
+temporary file. It announced that a run had diverged and destroyed the only record of how,
+in the same breath. What was lost is exactly what F17 needed: the `FAIL [group] line N:`
+line and the `[RTDE]` messages that name the failing path. Found on 2026-08-21 while trying
+to classify F16's source 2.
+
+**Status: FIXED on 2026-08-21.** A run whose exit code or summary line differs now has its
+full stdout kept as `datalogger/tests/mismatch_run_<N>.out`, named on the console next to
+the MISMATCH line, gitignored, and cleared at the start of the next `--repeat` run. The
+non-diverging runs are still deleted. Documented in `datalogger/README.md`.
+
+**Verified.** Against two stub harnesses standing in for the real one, one altering its
+summary line on run 3 and one altering its exit code on run 3: each leaves exactly one named
+file holding its full output, the console names it, and the campaign exits 1. A clean
+campaign leaves no file behind. Real harness re-run afterwards: `--repeat 3`, `3/3
+identical: 507 checks, 0 failure(s)`.
 
 ---
 
