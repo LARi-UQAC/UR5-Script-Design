@@ -9,3 +9,7 @@ Modules :
   live_ipc    : réception UDP et overlay live TCP depuis le simulateur
   app         : interface graphique matplotlib + point d'entrée main()
 """
+
+from venv_guard import ensure_venv
+
+ensure_venv()

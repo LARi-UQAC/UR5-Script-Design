@@ -17,6 +17,10 @@ Public API entry points live in ur5_sim.cli; for direct programmatic use, see
 the per-module imports below.
 """
 
+from venv_guard import ensure_venv
+
+ensure_venv()
+
 from ur5_sim.parsing.urscript import parse_poses, transform, urscript_pose
 from ur5_sim.kinematics.ik import run_ik
 from ur5_sim.reporting.text_report import report

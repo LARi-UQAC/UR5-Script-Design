@@ -4,14 +4,22 @@ chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
 pushd "%~dp0"
 
-REM Active l'environnement virtuel local (Python 3.13, swift-sim + websockets<13).
-REM Le venv isole les conflits avec l'environnement Python global (notamment
-REM google-genai qui exige websockets>=13).
-if exist ".venv\Scripts\activate.bat" (
-    call ".venv\Scripts\activate.bat"
-) else (
+REM Interprete l'environnement virtuel local par CHEMIN ABSOLU (Python 3.13,
+REM swift-sim + websockets<13), jamais via un `python` nu resolu par PATH.
+REM Mesure 2026-09-24 : un `python` nu peut resoudre vers un Python global
+REM (y compris celui d'un AUTRE compte Windows, admin, qui a sa propre copie
+REM parallele de swift-sim avec un websockets non-epingle) et planter, tres
+REM tard, au fond d'un thread Swift plutot qu'au demarrage (CLAUDE.md,
+REM "Dependency pinning"). `start` (option 5) herite normalement le PATH
+REM active, mais le chemin absolu rend ce fonctionnement independant du
+REM contexte d'appel (compte, elevation, fenetre deja ouverte).
+set "PY=%~dp0.venv\Scripts\python.exe"
+if not exist "%PY%" (
     echo [WARN] .venv absent : utilisation du Python systeme.
     echo        Pour creer le venv : python -m venv .venv ^&^& .venv\Scripts\activate ^&^& pip install -r requirements.txt
+    set "PY=python"
+) else (
+    call ".venv\Scripts\activate.bat"
 )
 
 :menu
@@ -44,31 +52,31 @@ echo.
 set /p choice="Choix : "
 
 if "%choice%"=="1" (
-    python -m ur5_sim --check
+    "%PY%" -m ur5_sim --check
     goto pause_back
 )
 if "%choice%"=="2" (
-    python -m ur5_sim --check --identity
+    "%PY%" -m ur5_sim --check --identity
     goto pause_back
 )
 if "%choice%"=="3" (
     call :start_monitor
-    python -m ur5_sim --visualize
+    "%PY%" -m ur5_sim --visualize
     goto pause_back
 )
 if "%choice%"=="4" (
     call :start_monitor
-    python -m ur5_sim --visualize --identity
+    "%PY%" -m ur5_sim --visualize --identity
     goto pause_back
 )
 if "%choice%"=="5" (
-    REM Lance l'UI de conception en fenetre detachee. Le bouton START
-    REM interne exporte etalement.script puis ouvre ur5_sim --visualize.
-    REM Si etalement.script existe deja, on ouvre aussi le viewer 3D immediatement
-    REM pour avoir les deux systemes en parallele.
-    start "UR5 - UI conception" python ur5_etalementv6.py
+    REM Lance l'UI de conception en fenetre detachee. Si etalement.script
+    REM existe deja, ouvre aussi le viewer 3D immediatement pour avoir les
+    REM deux systemes en parallele (l'UI n'ouvre pas elle-meme le viewer :
+    REM son bouton START exporte le script mais ne lance pas ur5_sim).
+    start "UR5 - UI conception" "%PY%" ur5_etalementv6.py
     if exist "%~dp0etalement.script" (
-        start "UR5 - Viewer 3D" python -m ur5_sim --visualize
+        start "UR5 - Viewer 3D" "%PY%" -m ur5_sim --visualize
     ) else (
         echo.
         echo [INFO] etalement.script absent : exportez-le depuis l'UI puis cliquez START.
@@ -76,16 +84,16 @@ if "%choice%"=="5" (
     goto pause_back
 )
 if "%choice%"=="6" (
-    python ur5_etalementv6.py
+    "%PY%" ur5_etalementv6.py
     goto pause_back
 )
 if "%choice%"=="7" (
     call :start_monitor
-    python -m ur5_sim --emulate --runs 2 --pause-at 30
+    "%PY%" -m ur5_sim --emulate --runs 2 --pause-at 30
     goto pause_back
 )
 if "%choice%"=="8" (
-    python -m ur5_sim --verify-csv auto
+    "%PY%" -m ur5_sim --verify-csv auto
     goto pause_back
 )
 if "%choice%"=="0" goto end
